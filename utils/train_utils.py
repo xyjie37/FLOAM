@@ -113,8 +113,11 @@ def get_model(args):
         net_glob = TextCNN(hidden_dim=100, num_channels=100, kernel_size=[3,4,5], max_len=200, dropout=0.5,
                            padding_idx=0, vocab_size=10000, num_classes=10).to(args.device)
         print('textcnn')
-    elif args.model == 'mlp' and args.dataset == 'mnist':
-        net_glob = MLP(dim_in=784, dim_hidden=256, dim_out=args.num_classes).to(args.device)
+    elif args.model == 'textcnn' and args.dataset == 'agnews':
+        net_glob = TextCNN(hidden_dim=100, num_channels=100, kernel_size=[3,4,5], max_len=200, dropout=0.5,
+                           padding_idx=0, vocab_size=20000, num_classes=4).to(args.device)
+    # elif args.model == 'mlp' and args.dataset == 'mnist':
+    #     net_glob = MLP(dim_in=784, dim_hidden=256, dim_out=args.num_classes).to(args.device)
     else:
         exit('Error: unrecognized model')
 
