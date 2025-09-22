@@ -7,6 +7,7 @@ import pickle
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 
 import torch.optim.lr_scheduler as lr_scheduler
 from utils.options import args_parser
@@ -29,7 +30,9 @@ if __name__ == '__main__':
     # torch.backends.cudnn.deterministic = True
     # np.random.seed(args.seed)
     task_num = args.task_num
-    args.device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() and args.gpu != -1 else 'cpu')
+    if args.gpu != '-1':
+        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    args.device = torch.device('cuda'if torch.cuda.is_available() else 'cpu')
 
     base_dir = './save/{}/{}_num{}_C{}_le{}_bs{}_round{}_m{}_lr{}/{}/'.format(
         dataset_path, args.model, args.num_users, args.frac, args.local_ep, args.local_bs, args.epochs, args.momentum, args.lr, args.results_save)
@@ -44,6 +47,10 @@ if __name__ == '__main__':
         os.makedirs(os.path.join(base_dir, algo_dir), exist_ok=True)
 
     net_glob = get_model(args)
+    if torch.cuda.device_count() > 1:
+        print("Let's use", torch.cuda.device_count(), "GPUs!")
+        net_glob = nn.DataParallel(net_glob)
+    net_glob.to(args.device)
     net_glob.train()
     optimizer = torch.optim.SGD(net_glob.parameters(), lr=args.lr, momentum=0.9)    
     scheduler = lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.1)
