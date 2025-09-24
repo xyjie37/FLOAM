@@ -3,6 +3,8 @@ from models.Nets import CNNCifar, MobileNetCifar, CNNMnist
 from models.ResNet import ResNet18, ResNet50
 from models.tinyresnet import TinyResNet18
 from utils.sampling import iid, noniid, iid_unbalanced, noniid_unbalanced
+from models.speechresnet import SpeechResNet18
+from models.TextCNN import TextCNN
 
 trans_mnist = transforms.Compose([transforms.ToTensor(),
                                   transforms.Normalize((0.1307,), (0.3081,))])
@@ -105,8 +107,17 @@ def get_model(args):
     elif args.model == 'cnn' and args.dataset in ['mnist','fmnist']:
         net_glob = CNNMnist(args=args).to(args.device)
         print('cnnmnist')
-    elif args.model == 'mlp' and args.dataset == 'mnist':
-        net_glob = MLP(dim_in=784, dim_hidden=256, dim_out=args.num_classes).to(args.device)
+    elif args.model == 'speechresnet' and args.dataset == 'speechcommands':
+        net_glob = SpeechResNet18(num_classes=args.num_classes).to(args.device)
+    elif args.model == 'textcnn' and args.dataset == 'yahooanswers':
+        net_glob = TextCNN(hidden_dim=100, num_channels=100, kernel_size=[3,4,5], max_len=200, dropout=0.5,
+                           padding_idx=0, vocab_size=10000, num_classes=10).to(args.device)
+        print('textcnn')
+    elif args.model == 'textcnn' and args.dataset == 'agnews':
+        net_glob = TextCNN(hidden_dim=100, num_channels=100, kernel_size=[3,4,5], max_len=200, dropout=0.5,
+                           padding_idx=0, vocab_size=20000, num_classes=4).to(args.device)
+    # elif args.model == 'mlp' and args.dataset == 'mnist':
+    #     net_glob = MLP(dim_in=784, dim_hidden=256, dim_out=args.num_classes).to(args.device)
     else:
         exit('Error: unrecognized model')
 

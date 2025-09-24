@@ -7,6 +7,7 @@ import pickle
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 from utils.options import args_parser
 from utils.train_utils import get_data, get_model
 from models.Update import LocalUpdateFedACD
@@ -16,12 +17,19 @@ from create_anchor import create_anchor, agg_func, proto_aggregation
 class FedACDServer:
     def __init__(self, args):
         self.args = args
-        self.device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() and args.gpu != -1 else 'cpu')
+        if args.gpu != '-1':
+            os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.args.device = self.device
         self.dataset_path = args.datasetpath
         self.task_num = args.task_num
       
         # 初始化全局模型
         self.net_glob = get_model(args)
+        if torch.cuda.device_count() > 1:
+            print("Let's use", torch.cuda.device_count(), "GPUs!")
+            self.net_glob = nn.DataParallel(self.net_glob)
+        self.net_glob.to(self.device)
         self.net_glob.train()
       
         # 创建全局锚点
@@ -54,6 +62,12 @@ class FedACDServer:
             return create_anchor(100, 512)
         elif self.args.dataset == 'tinyimagenet':
             return create_anchor(200, 2048)
+        elif self.args.dataset == 'speechcommands':
+            return create_anchor(30, 512)
+        elif self.args.dataset == 'yahooanswers':
+            return create_anchor(10, 300)
+        elif self.args.dataset == 'agnews':
+            return create_anchor(4, 100)
         return create_anchor(10, 32)  # 默认值
 
     def _create_save_directory(self):
@@ -171,6 +185,5 @@ class FedACDServer:
 
 if __name__ == '__main__':
     args = args_parser()
-    args.device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() and args.gpu != -1 else 'cpu')
     server = FedACDServer(args)
     server.train()

@@ -266,8 +266,8 @@ class AnchorContrastiveLoss(nn.Module):
         initial_body_state = {name: param.clone().detach() for name, param in net.named_parameters() if 'linear' not in name}
       
         # 仅训练body部分
-        body_params = [p for name, p in net.named_parameters() if 'linear' not in name]
-        head_params = [p for name, p in net.named_parameters() if 'linear' in name]
+        body_params = [p for name, p in net.module.named_parameters() if 'linear' not in name]
+        head_params = [p for name, p in net.module.named_parameters() if 'linear' in name]
         for para in head_params:
             para.requires_grad = False
         optimizer = torch.optim.SGD(body_params, lr=lr, momentum=self.args.momentum, weight_decay=self.args.wd)
@@ -283,8 +283,8 @@ class AnchorContrastiveLoss(nn.Module):
             batch_loss = []
             for batch_idx, (images, labels) in enumerate(self.ldr_train):
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
-                features = net.extract_features(images)
-                logits = net.only_liner(features)
+                features = net.module.extract_features(images)
+                logits = net.module.only_liner(features)
                 loss_ce = self.loss_func(logits, labels)
               
                 contrast_loss = AnchorContrastiveLoss(
@@ -335,7 +335,7 @@ class AnchorContrastiveLoss(nn.Module):
       
         # 应用元学习率更新参数
         with torch.no_grad():
-            for name, param in net.named_parameters():
+            for name, param in net.module.named_parameters():
                 if 'linear' not in name:
                     initial_p = initial_body_state[name]
                     param.data = initial_p + (param.data - initial_p) * self.base_meta.item()
@@ -350,14 +350,14 @@ class AnchorContrastiveLoss(nn.Module):
                     
                     #teacher_outputs = teacher_net(images)
                     #adjusted_teacher_outputs = self.teacher_output_adjuster(teacher_outputs)
-                features = net.extract_features(images)
+                features = net.module.extract_features(images)
                 #logits = net.only_liner(features)
                 # 使用对比损失作为元损失，可替换为其他目标
                 meta_loss += AnchorContrastiveLoss(
                     anchors=self.anchor,
                     temperature=0.5,
                     device=self.args.device
-                )(features=net.only_liner(features), labels=labels)
+                )(features=net.module.only_liner(features), labels=labels)
                 #meta_loss += AnchorDistillationLoss(logits, adjusted_teacher_outputs, self.anchor, temperature=1.0)()
         meta_loss /= len(self.ldr_train)
       
@@ -372,7 +372,7 @@ class AnchorContrastiveLoss(nn.Module):
         with torch.no_grad():
             for batch_idx, (images, labels) in enumerate(self.ldr_train):
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
-                features = net.extract_features(images)
+                features = net.module.extract_features(images)
                 uniq_l = labels.unique()
                 for label in uniq_l:
                     lbl = label.item()
@@ -423,11 +423,11 @@ class LocalUpdateFedACD(object):
         # self.teacher_output_adjuster = nn.Linear(teacher_output_size, 100).to(self.args.device)
         # --- 删除结束 ---
 
-        initial_body_state = {name: param.clone().detach() for name, param in net.named_parameters() if 'linear' not in name}
+        initial_body_state = {name: param.clone().detach() for name, param in net.module.named_parameters() if 'linear' not in name}
 
         # 仅训练body部分
-        body_params = [p for name, p in net.named_parameters() if 'linear' not in name]
-        head_params = [p for name, p in net.named_parameters() if 'linear' in name]
+        body_params = [p for name, p in net.module.named_parameters() if 'linear' not in name]
+        head_params = [p for name, p in net.module.named_parameters() if 'linear' in name]
         for para in head_params:
             para.requires_grad = False
         optimizer = torch.optim.SGD(body_params, lr=lr, momentum=self.args.momentum, weight_decay=self.args.wd)
@@ -442,8 +442,8 @@ class LocalUpdateFedACD(object):
             batch_loss = []
             for batch_idx, (images, labels) in enumerate(self.ldr_train):
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
-                features = net.extract_features(images)
-                logits = net.only_liner(features)
+                features = net.module.extract_features(images)
+                logits = net.module.only_liner(features)
                 loss_ce = self.loss_func(logits, labels)
 
                 contrast_loss = AnchorContrastiveLoss(
@@ -508,7 +508,7 @@ class LocalUpdateFedACD(object):
 
         # 应用元学习率更新参数
         with torch.no_grad():
-            for name, param in net.named_parameters():
+            for name, param in net.module.named_parameters():
                 if 'linear' not in name:
                     initial_p = initial_body_state[name]
                     param.data = initial_p + (param.data - initial_p) * self.base_meta.item()
@@ -519,12 +519,12 @@ class LocalUpdateFedACD(object):
         with torch.enable_grad():
             for images, labels in self.ldr_train:
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
-                features = net.extract_features(images)
+                features = net.module.extract_features(images)
                 meta_loss += AnchorContrastiveLoss(
                     anchors=self.anchor,
                     temperature=0.5,
                     device=self.args.device
-                )(features=net.only_liner(features), labels=labels)
+                )(features=net.module.only_liner(features), labels=labels)
         meta_loss /= len(self.ldr_train)
 
         self.meta_optimizer.zero_grad()
@@ -537,7 +537,7 @@ class LocalUpdateFedACD(object):
         with torch.no_grad():
             for batch_idx, (images, labels) in enumerate(self.ldr_train):
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
-                features = net.extract_features(images)
+                features = net.module.extract_features(images)
                 uniq_l = labels.unique()
                 for label in uniq_l:
                     lbl = label.item()

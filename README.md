@@ -8,3 +8,6 @@ Before running the main code, the data allocation program need to be executed.Da
 The code can be run as follows:<br>
 `python main_floam.py --dataset cifar10 --model resnet18 --num_classes 10 --epochs 100 --lr 0.1 --num_users 20 --frac 0.5 --local_ep 5 --local_bs 50 --results_save run0 --wd 0.0 --datasetpath ./dataset/cifar10-dir-0.1-task-10 --task_num 10`<br>
 If you want to run other baseline algorithms, simply replace the main script with the corresponding one.
+
+
+python main_floam.py --dataset speechcommands --model speechresnet --num_classes 30 --epochs 100 --lr 0.1 --num_users 20 --frac 0.5 --local_ep 5 --local_bs 50 --results_save run0 --wd 0.0 --datasetpath ./dataset/speechcommands-dir-0.1-task-10 --task_num 10
