@@ -5,12 +5,16 @@ import torch.optim as optim
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import torch.nn as nn
+from torch.nn.utils import clip_grad_norm_
 
 
-
-import torch
 
 def create_anchor(class_num=10, dim=32):
+    # 正交初始化（转置后处理，使行向量正交）
+    anchors = torch.nn.Parameter(torch.empty(class_num, dim))
+    torch.nn.init.orthogonal_(anchors.T)  # 对转置矩阵正交化，使原始行向量正交
+    return anchors.detach()
+'''def create_anchor(class_num=10, dim=32):
     # 初始化参数
     anchors = torch.nn.Parameter(torch.randn(class_num, dim))
     optimizer = torch.optim.AdamW([anchors], lr=0.03, weight_decay=1e-4)
@@ -52,48 +56,11 @@ def create_anchor(class_num=10, dim=32):
                 avg_inter = dist[~eye_mask].mean().item()
             print(f"Epoch {epoch+1}/1000 | Margin:{current_margin:.2f} | Intra:{avg_intra:.2f} | Inter:{avg_inter:.2f}")
     
-    return anchors.detach()
-'''def create_anchor(class_num=10, dim=32):
-    # 初始化参数
-    anchors = torch.nn.Parameter(torch.randn(class_num, dim))
-    optimizer = torch.optim.AdamW([anchors], lr=0.03, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1000)
-    
-    # 动态参数配置
-    base_margin = 1.2
-    min_dist = 0.3
-    decay_rate = 0.995
-    
-    for epoch in range(1000):
-        # 动态调整参数
-        current_margin = base_margin * (decay_rate ** epoch)
-        current_min_dist = min_dist + 0.2 * (1 - decay_rate ** epoch)
-        
-        # 距离矩阵计算
-        dist = torch.cdist(anchors, anchors, p=2)
-        eye_mask = torch.eye(class_num, dtype=bool)
-        
-        # 边界损失计算（平方形式增强梯度）
-        intra_loss = torch.mean(torch.relu(current_min_dist - dist[eye_mask]) ** 2)
-        inter_loss = torch.mean(torch.relu(current_margin - dist[~eye_mask]) ** 2)
-        
-        # 组合损失
-        loss = intra_loss + 3.0 * inter_loss  # 增强类间约束权重
-        
-        # 优化步骤
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_([anchors], 1.0)  # 梯度裁剪
-        optimizer.step()
-        scheduler.step()
-        
-        # 监控输出
-        if (epoch+1) % 100 == 0:
-            with torch.no_grad():
-                avg_inter = dist[~eye_mask].mean().item()
-            print(f"Epoch {epoch+1}/1000 | Margin:{current_margin:.2f} | AvgDist:{avg_inter:.2f}")
-    
     return anchors.detach()'''
+
+
+
+
 
 def agg_func(protos):
     """
