@@ -19,7 +19,16 @@ from collections import defaultdict
 import torch.optim as optim
 from scipy.stats import wasserstein_distance
 from cvxopt import matrix, solvers
-
+from collections import Counter
+import torchvision.transforms.functional as TF
+from collections import OrderedDict
+from typing import Callable
+import multiprocessing as mp
+import atexit
+import threading
+from queue import Queue
+from copy import deepcopy
+import gc
 
 class DatasetSplit(Dataset):
     def __init__(self, dataset, idxs):
@@ -32,7 +41,6 @@ class DatasetSplit(Dataset):
     def __getitem__(self, item):
         image, label = self.dataset[self.idxs[item]]
         return image, label
-
 
 class AnchorContrastiveLoss(nn.Module):
     """
@@ -230,7 +238,7 @@ class AnchorContrastiveLoss(nn.Module):
         return loss
 
 
-class LocalUpdateFedACD(object):
+class LocalUpdateFedACD(object):         #完整版客户端
     def __init__(self, args, anchor=None, dataset=None, idxs=None, task=0, pretrain=False):
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
@@ -378,10 +386,10 @@ class LocalUpdateFedACD(object):
                     agg_protos_label[lbl] = agg_protos_label.get(lbl, 0) + weighted.cpu()
             for lbl in agg_protos_label:
                 agg_protos_label[lbl] /= len(self.ldr_train)
-
+        
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss), agg_protos_label
 
-class AnchorDistillationLoss(nn.Module):
+class AnchorDistillationLoss(nn.Module):       #原版本AD
     def __init__(self, student_outputs, teacher_outputs, anchors, temperature=1.0, lambda_anchor=0.1, device='cuda'):
         """
         初始化锚点蒸馏损失。
@@ -532,7 +540,7 @@ class AnchorDistillationLoss(nn.Module):
         emd_loss = self.earth_movers_distance(cost_matrix, transport_matrix)
         
         return emd_loss
-#fedavg
+
 class LocalUpdate(object):
     def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
         self.args = args
@@ -623,156 +631,7 @@ class LocalUpdateFedProx(object):
             
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss) 
     
-#icarl+fl
-class LocalUpdateICARL(object):
-    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
-        self.args = args
-        self.loss_func = nn.CrossEntropyLoss()
-        self.selected_clients = []
-        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
-        self.pretrain = pretrain
-        self.exemplar_sets = []  # 用于存储每个类的样本
 
-    def train(self, net, lr, idx=-1, local_eps=None):
-        net.train()
-
-        optimizer = torch.optim.SGD(net.parameters(), lr=lr,
-                                    momentum=self.args.momentum,
-                                    weight_decay=self.args.wd)
-
-        epoch_loss = []
-
-        if local_eps is None:
-            if self.pretrain:
-                local_eps = self.args.local_ep_pretrain
-            else:
-                local_eps = self.args.local_ep
-
-        for iter in range(local_eps):
-            batch_loss = []
-            for batch_idx, (images, labels) in enumerate(self.ldr_train):
-                images, labels = images.to(self.args.device), labels.to(self.args.device)
-                logits = net(images)
-                loss = self.loss_func(logits, labels)
-
-                # 添加蒸馏损失
-                if self.exemplar_sets:
-                    old_classes_logits = net(self.exemplar_sets)
-                    distillation_loss = self.distillation_loss(logits, old_classes_logits)
-                    loss += distillation_loss
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                batch_loss.append(loss.item())
-
-            epoch_loss.append(sum(batch_loss)/len(batch_loss))
-
-        # 更新样本集
-        self.update_exemplar_sets(net)
-
-        return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
-
-    def distillation_loss(self, new_logits, old_logits):
-        # 计算蒸馏损失
-        return nn.KLDivLoss()(F.log_softmax(new_logits, dim=1), F.softmax(old_logits, dim=1))
-
-    def update_exemplar_sets(self, net):
-        # 更新样本集
-        new_exemplars = self.select_exemplars(net)
-        self.exemplar_sets.extend(new_exemplars)
-
-    def select_exemplars(self, net):
-        # 基于herding选择样本
-        exemplars = []
-        for images, labels in self.ldr_train:
-            images = images.to(self.args.device)
-            features = net(images)
-            exemplars.extend(self.herding(features, labels))
-        return exemplars
-
-    def herding(self, features, labels):
-        # Herding算法选择样本
-        exemplars = []
-        for label in torch.unique(labels):
-            class_features = features[labels == label]
-            mean_feature = torch.mean(class_features, dim=0)
-            distances = torch.norm(class_features - mean_feature, dim=1)
-            exemplars.extend(class_features[torch.argsort(distances)[:self.args.m]])
-        return exemplars
-
-#fedntd
-class NTD_Loss(nn.Module):
-    def __init__(self, num_classes, tau=3, beta=1):
-        super(NTD_Loss, self).__init__()
-        self.CE = nn.CrossEntropyLoss()
-        self.MSE = nn.MSELoss()
-        self.KLDiv = nn.KLDivLoss(reduction="batchmean")
-        self.tau = tau
-        self.beta = beta
-        self.num_classes = num_classes 
-    def forward(self, logits, targets, dg_logits):
-        ce_loss = self.CE(logits, targets)
-        ntd_loss = self._ntd_loss(logits, dg_logits, targets)
-
-        loss = ce_loss + self.beta * ntd_loss
-
-        return loss
-
-    def _ntd_loss(self, logits, dg_logits, targets):
-        T = self.tau  
-        dg_probs = F.softmax(dg_logits / T, dim=1)
-        student_probs = F.softmax(logits / T, dim=1)
-        kl_div_loss = self.KLDiv(F.log_softmax(logits / T, dim=1), dg_probs)
-        kl_div_loss /= self.num_classes
-
-        return kl_div_loss
-def refine_as_not_true(logits, targets, num_classes):
-    nt_positions = torch.arange(0, num_classes).to(logits.device)
-    nt_positions = nt_positions.repeat(logits.size(0), 1)
-    nt_positions = nt_positions[nt_positions[:, :] != targets.view(-1, 1)]
-    nt_positions = nt_positions.view(-1, num_classes - 1)
-
-    logits = torch.gather(logits, 1, nt_positions)
-
-    return logits   
-
-
-class LocalUpdateNTD(object):
-    def __init__(self, args, dataset=None, task=0, idxs=None):
-        self.args = args
-        self.dataset = dataset
-        self.idxs = idxs
-        self.loss_func = NTD_Loss(num_classes=args.num_classes, tau=args.tau, beta=args.beta)
-        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
-
-    def train(self, net, lr=None):
-        self.optimizer = torch.optim.SGD(net.parameters(), lr=self.args.lr, momentum=self.args.momentum)
-
-        net.train()
-        
-        epoch_loss = []
-        num_updates = 0
-        
-        for iter in range(self.args.local_ep):
-            batch_loss = []
-            for batch_idx, (images, labels) in enumerate(self.ldr_train):
-                images, labels = images.to(self.args.device), labels.to(self.args.device)
-                logits = net(images)
-                dg_logits = net(images).detach()
-                loss = self.loss_func(logits, labels, dg_logits)
-                
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-
-                num_updates += 1
-                batch_loss.append(loss.item())
-            
-            epoch_loss.append(sum(batch_loss) / len(batch_loss))
-        
-        return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
 #fedknow
 class LocalUpdateFedKnow(object):
@@ -1367,190 +1226,274 @@ class LocalUpdateCGoFed(object):
         """
         # Placeholder for sampling logic
         return DataLoader(loader.dataset, batch_size=self.args.sample_bs, shuffle=True)
-    
-#TagFed
-class LocalUpdateTagFed(object):
-    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn import LayerNorm
+
+class CDAPGenerator(nn.Module):
+    def __init__(self, feat_dim=512, prompt_dim=64, num_tasks=5):
+        super().__init__()
+        self.prompt_dim = prompt_dim
+        self.ln = LayerNorm(feat_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim),
+            nn.GELU(),
+            nn.Linear(feat_dim, prompt_dim)
+        )
+        
+        # 添加CCDA层
+        self.ccda = nn.Linear(prompt_dim, prompt_dim)
+        
+        # 添加LT层参数预测器
+        self.affine_predictor = nn.Sequential(
+            nn.Linear(feat_dim, prompt_dim * 2),
+            nn.GELU(),
+            nn.Linear(prompt_dim * 2, prompt_dim * 2)
+        )
+        
+    def forward(self, features, task_id):
+        # 样本级提示
+        x = self.ln(features)
+        sample_prompts = self.mlp(x)  # [batch, prompt_dim]
+        
+        # 应用CCDA层
+        adapted_prompts = self.ccda(sample_prompts)
+        
+        # 预测LT参数
+        affine_params = self.affine_predictor(features)  # [batch, prompt_dim*2]
+        alpha, lambda_ = torch.chunk(affine_params, 2, dim=1)  # 各自 [batch, prompt_dim]
+        
+        # 应用LT变换
+        final_prompts = alpha * adapted_prompts + lambda_
+        
+        return final_prompts  # [batch, prompt_dim]
+
+
+
+class LocalUpdateRifFiL(object):
+    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False, prompt_dim=None):  # 添加 prompt_dim 参数
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
         self.selected_clients = []
         self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
         self.pretrain = pretrain
-        self.task = task  # 当前任务标识
-        self.masks = {}  # 存储每个任务的掩码
+        
+        # RefFiL modules
+        # 使用传入的 prompt_dim 或 args.prompt_dim
+        self.prompt_dim = prompt_dim if prompt_dim is not None else args.prompt_dim
+        print(f"[Client] Using prompt_dim={self.prompt_dim}")
+        
+        self.cdap = CDAPGenerator(feat_dim=50, prompt_dim=self.prompt_dim)  # 使用统一维度，512 for CIFAR, 2048 for TinyImageNet
+        self.current_global_prompts = None
+        self.temperature = nn.Parameter(torch.tensor(0.9))
+        self.prompt_cache = {}
+        self.current_task = task
+        self.current_labels = []  # 添加标签缓存
+        
+    def compute_gpl_loss(self, logits_global, labels):
+        return F.cross_entropy(logits_global, labels)
+    
+    def compute_dpcl_loss(self, local_prompts, global_prototypes, labels):
+        """
+        重构的领域特定提示对比学习
+        关键改进：使用类别原型而非所有全局提示
+        """
+        # 1. 维度校验
+        assert local_prompts.dim() == 2, f"需要2D张量，实际维度: {local_prompts.dim()}"
+        assert global_prototypes.dim() == 2, f"需要2D张量，实际维度: {global_prototypes.dim()}"
+        assert local_prompts.size(1) == global_prototypes.size(1), \
+            f"提示维度不匹配: 本地{local_prompts.size(1)} vs 全局{global_prototypes.size(1)}"
+        
+        # 2. 提取对应类别的全局原型
+        target_prototypes = global_prototypes[labels]  # [batch, prompt_dim]
+        
+        # 3. 计算每个本地提示与其类别原型的相似度
+        similarities = F.cosine_similarity(
+            local_prompts,
+            target_prototypes,
+            dim=1
+        )  # [batch]
+        
+        # 4. 温度缩放和损失计算
+        logits = similarities / self.temperature.clamp(min=0.3)
+        return -logits.mean()  # 最大化相似度
 
-    def apply_mask(self, net, mask):
-        """应用掩码到模型参数"""
-        for name, param in net.named_parameters():
-            if name in mask:
-                param.data = param.data * mask[name].to(param.device)
-
-    def generate_mask(self, net, task_id):
-        """为当前任务生成掩码"""
-        mask = {}
-        for name, param in net.named_parameters():
-            if f"task_{task_id}" not in self.masks:
-                # 初始化掩码，允许新任务使用未被占用的神经元
-                mask[name] = torch.ones_like(param.data)
-            else:
-                # 如果是重复任务，复用之前的掩码
-                mask[name] = self.masks[f"task_{task_id}"][name]
-        return mask
 
     def train(self, net, lr, idx=-1, local_eps=None):
+        self.update_temperature(self.current_task)
         net.train()
+        self.cdap.train()
 
-        # 定义优化器
-        optimizer = torch.optim.SGD(net.parameters(), lr=lr,
-                                    momentum=self.args.momentum,
-                                    weight_decay=self.args.wd)
+        optimizer = torch.optim.SGD(
+            list(net.parameters()) + list(self.cdap.parameters()),
+            lr=lr,
+            momentum=self.args.momentum,
+            weight_decay=self.args.wd
+        )
 
         epoch_loss = []
-        feature_maps = []  # 存储特征图
-        all_logits = []    # 存储logits
-
-        # 动态设置本地训练轮数
-        if local_eps is None:
-            local_eps = self.args.local_ep_pretrain if self.pretrain else self.args.local_ep
-
-        # 为当前任务生成掩码
-        mask = self.generate_mask(net, self.task)
-        self.apply_mask(net, mask)
-
-        for iter in range(local_eps):
+        local_eps = self.args.local_ep if local_eps is None else local_eps
+        
+        for _ in range(local_eps):
             batch_loss = []
-            for batch_idx, (images, labels) in enumerate(self.ldr_train):
+            for images, labels in self.ldr_train:
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
-
-                # 前向传播
-                logits = net(images)
-                features = net.extract_features(images)
-                loss = self.loss_func(logits, labels)
-
-                # 反向传播
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                # 应用掩码，确保冻结的权重不被更新
-                self.apply_mask(net, mask)
-
-                batch_loss.append(loss.item())
-
-                # 存储特征图和logits
-                feature_maps.append(features.detach().cpu())  # 提取特征图
-                all_logits.append(logits.detach().cpu())      # 提取logits
-
-            epoch_loss.append(sum(batch_loss) / len(batch_loss))
-
-        # 更新当前任务的掩码
-        self.masks[f"task_{self.task}"] = mask
-
-        # 返回特征图、logits 和平均损失
-        return feature_maps, all_logits, sum(epoch_loss) / len(epoch_loss)
-    
-class LocalUpdateMFCL(object):
-    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
-        self.args = args
-        self.loss_func = nn.CrossEntropyLoss()
-        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
-        self.pretrain = pretrain
-        self.task = task  # 当前任务标识
-        from utils.train_utils import get_data, get_model
-        self.device = args.device
-        
-    # 客户端训练
-    def train(self, server_model, generator, w_ft=1,
-                     w_kd=1, local_eps = None):
-        # client_model = self.local_model
-        client_model = server_model
-        device = self.args.device
-        task_classes = self.args.num_classes
-        client_model.train()
-        optimizer = optim.SGD(client_model.parameters(), lr=0.001)
-        criterion_ce = nn.CrossEntropyLoss()
-        
-         # 冻结特征提取部分，只训练分类头
-        # for param in client_model.parameters():
-        #     param.requires_grad = False
-        # client_model.linear.requires_grad = True
-        
-        # 动态设置本地训练轮数
-        if local_eps is None:
-            local_eps = self.args.local_ep_pretrain if self.pretrain else self.args.local_ep
-            
-        # 获取合成数据
-        synthetic_images = None
-        if self.task > 0:
-            noise = torch.randn(len(self.ldr_train), 100).to(self.device)
-            synthetic_images = generator(noise)
-            
-        
-        epoch_loss = []
-        # 训练当前任务
-        for epoch in range(local_eps):
-            batch_loss = []
-            for batch_idx, (images, labels) in enumerate(self.ldr_train):
-                images, labels = images.to(self.args.device), labels.to(self.args.device)
-
-                # 前向传播
-                logits = client_model(images)
-                loss = self.loss_func(logits, labels)
+                self.current_labels = labels  # 缓存当前批次标签
                 
-                # 如果有合成数据，添加合成数据的损失
-                if self.task > 0 and synthetic_images is not None:
-                    synthetic_outputs = client_model(synthetic_images)
-                    synthetic_labels = torch.randint(0, self.args.num_classes, (synthetic_images.size(0),)).to(self.device)
-                    synthetic_loss = criterion_ce(synthetic_outputs, synthetic_labels)
-                    total_loss = loss + synthetic_loss
+                # 特征提取
+                features = net.extract_features(images)
+                logits_local = net.only_liner(features)
+                
+                # 生成本地提示
+                task_ids = torch.full((len(images),), self.current_task, 
+                                    device=self.args.device)
+                local_prompts = self.cdap(features.detach(), task_ids)
+                
+                # 全局提示处理
+                with torch.no_grad():
+                    # 关键修改1: 创建全局类别原型矩阵
+                    global_prototypes = torch.zeros(
+                        self.args.num_classes, 
+                        self.prompt_dim,
+                        device=self.args.device
+                    )
+                    
+                    # 聚合每个类别的平均提示
+                    for cls in range(self.args.num_classes):
+                        if cls in self.current_global_prompts:
+                            cls_prompts = self.current_global_prompts[cls]
+                            global_prototypes[cls] = cls_prompts.mean(dim=0)
+                        else:
+                            # 回退机制：随机初始化
+                            global_prototypes[cls] = torch.randn(
+                                self.prompt_dim, 
+                                device=self.args.device
+                            )
+                    
+                    # 关键修改2: 保留原始全局提示用于GPL损失
+                    all_prompt_features = []
+                    all_prompt_labels = []
+                    
+                    # 收集全局提示
+                    for label in labels.unique():
+                        label_int = label.item()
+                        if label_int in self.current_global_prompts:
+                            class_prompts = self.current_global_prompts[label_int]
+                            num_prompts = class_prompts.size(0)
+                            
+                            all_prompt_features.append(class_prompts)
+                            all_prompt_labels.append(label.repeat(num_prompts))
+                    
+                    # 处理没有全局提示的情况
+                    if all_prompt_features:
+                        global_prompts = torch.cat(all_prompt_features)
+                        prompt_labels = torch.cat(all_prompt_labels)
+                    else:
+                        num_fallback = min(10, len(labels))
+                        global_prompts = torch.randn(
+                            num_fallback, self.prompt_dim,
+                            device=self.args.device
+                        )
+                        prompt_labels = torch.randint(
+                            0, self.args.num_classes, (num_fallback,), 
+                            device=self.args.device
+                        )
+                    
+                    # 获取真实样本特征（用于GPL损失）
+                    real_global_features = []
+                    valid_global_labels = []
+                    
+                    # 关键优化：向量化操作
+                    unique_labels = prompt_labels.unique()
+                    label_mask_dict = {}
+                    
+                    for label in unique_labels:
+                        mask = (labels == label)
+                        if mask.any():
+                            indices = torch.where(mask)[0]
+                            label_mask_dict[label.item()] = indices
+                    
+                    for label in prompt_labels:
+                        label_val = label.item()
+                        if label_val in label_mask_dict and len(label_mask_dict[label_val]) > 0:
+                            idx = torch.randint(0, len(label_mask_dict[label_val]), (1,))
+                            real_idx = label_mask_dict[label_val][idx]
+                            real_global_features.append(features[real_idx])
+                            valid_global_labels.append(label)
+                        else:
+                            rand_idx = torch.randint(0, len(features), (1,))
+                            real_global_features.append(features[rand_idx])
+                            valid_global_labels.append(labels[rand_idx][0])
+                    
+                    # 转换结果
+                    real_global_features = torch.cat(real_global_features)
+                    valid_global_labels = torch.tensor(valid_global_labels, 
+                                                    device=self.args.device,
+                                                    dtype=torch.long)
+                    
+                    # 计算全局logits
+                    logits_global = net.only_liner(real_global_features)
+                
+                # 损失计算
+                ce_loss = self.loss_func(logits_local, labels)
+                gpl_loss = self.compute_gpl_loss(logits_global, valid_global_labels)
+                
+                # DPCL损失计算 - 关键修改3: 使用类别原型
+                if len(local_prompts) == 0:
+                    dpcl_loss = torch.tensor(0.0, device=self.args.device)
                 else:
-                    total_loss = loss
-
+                    # 添加维度校验
+                    assert local_prompts.size(-1) == global_prototypes.size(-1), \
+                        f"提示维度不匹配: 本地{local_prompts.size(-1)} vs 全局原型{global_prototypes.size(-1)}"
+                    
+                    # 使用重构后的DPCL损失函数
+                    dpcl_loss = self.compute_dpcl_loss(
+                        local_prompts, 
+                        global_prototypes,  # 使用类别原型而非所有提示
+                        labels
+                    )
+                
+                total_loss = ce_loss + 0.5*gpl_loss + 0.3*dpcl_loss
+                
                 # 反向传播
                 optimizer.zero_grad()
-                total_loss.backward(retain_graph = True)
+                total_loss.backward()
                 optimizer.step()
-
-                batch_loss.append(loss.item())
-
-            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+                
+                batch_loss.append(total_loss.item())
             
-        client_data = self.ldr_train
-        # 使用合成数据和真实数据训练以克服遗忘
-#         noise = torch.randn(len(client_data), 100).to(device)
-#         synthetic_images = generator(noise)
-#         client_data_tensors = []
-#         client_labels_tensors = []
-#         for batch in client_data:
-#             data, labels = batch
-#             client_data_tensors.append(data)
-#             client_labels_tensors.append(labels)
-
-#         # 将所有批次的数据和标签拼接成一个大张量
-#         client_data_tensor = torch.cat(client_data_tensors, dim=0).to(device)
-#         client_labels_tensor = torch.cat(client_labels_tensors, dim=0).to(device)
-#         all_data = torch.cat([client_data_tensor, synthetic_images], dim=0)
-#         all_labels = torch.cat([client_labels_tensor, client_labels_tensor], dim=0)
-
-#         for param in client_model.parameters():
-#             param.requires_grad = False
-#         client_model.linear.requires_grad = True
-
-#         optimizer = optim.SGD(client_model.linear.parameters(), lr=0.001)
-#         optimizer.zero_grad()
-#         ft_outputs = client_model(all_data)
-#         ft_loss = criterion_ce(ft_outputs, all_labels)
-#         ft_loss.backward()
-#         optimizer.step()
-
-        # 重要性加权特征蒸馏
-#         with torch.no_grad():
-#             client_features = client_model.features(client_data)
-#             server_features = server_model.features(client_data)
-#         kd_loss = torch.mean((client_features - server_features) ** 2)
-
-#         optimizer.zero_grad()
-#         kd_loss.backward()
-#         optimizer.step()
+            epoch_loss.append(sum(batch_loss)/len(batch_loss))
         
-        return client_model.state_dict(), sum(epoch_loss) / len(epoch_loss)
+        return {
+            "model_state": net.state_dict(),
+            "prompts": local_prompts.detach().cpu(),
+            "loss": sum(epoch_loss)/len(epoch_loss)
+        }
+
+
+    def update_global_prompts(self, global_prompts_dict):
+        device = self.args.device
+        self.current_global_prompts = {
+            class_id: prompts.to(device) 
+            for class_id, prompts in global_prompts_dict.items()
+        }
+        self.prompt_cache = {}
+        
+    def set_current_task(self, task_id):
+        self.current_task = task_id
+    def update_temperature(self, current_task):
+    # 论文中的温度衰减公式
+        tau_min = 0.3
+        gamma = 0.1
+        beta = 0.05
+        tau = 0.9
+        
+        tau_prime = max(tau_min, tau * (1 - (gamma + (current_task - 1) * beta)))
+        self.temperature.data = torch.tensor(tau_prime, device=self.args.device)
+
+
+
+
