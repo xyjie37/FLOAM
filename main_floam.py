@@ -68,6 +68,8 @@ class FedACDServer:
             return create_anchor(10, 300)
         elif self.args.dataset == 'agnews':
             return create_anchor(4, 100)
+        elif self.args.dataset == '20newsgroups':
+            return create_anchor(20, 300)
         return create_anchor(10, 32)  # 默认值
 
     def _create_save_directory(self):
