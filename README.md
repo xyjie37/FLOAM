@@ -7,7 +7,7 @@ Federated continual learning aims to enable decentralized clients to adapt to ev
 
 ## Data Partition
 
-Before running the main code, the data allocation program need to be executed.Data allocation methods are categorized into multi-task and class-incremental types, all data allocation code is located in the `./dataset` folder.
+Before running the main code, the data allocation program need to be executed. Data allocation methods are categorized into multi-task and class-incremental types, all data allocation code is located in the `./dataset` folder.
 
 ## Run Code
 
