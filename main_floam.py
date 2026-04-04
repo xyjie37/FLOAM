@@ -62,6 +62,8 @@ class FedACDServer:
             return create_anchor(100, 512)
         elif self.args.dataset == 'tinyimagenet':
             return create_anchor(200, 2048)
+        elif self.args.dataset == 'imagenet100':
+            return create_anchor(100, 512)
         elif self.args.dataset == 'speechcommands':
             return create_anchor(30, 512)
         elif self.args.dataset == 'yahooanswers':

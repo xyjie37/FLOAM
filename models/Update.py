@@ -1495,5 +1495,724 @@ class LocalUpdateRifFiL(object):
         self.temperature.data = torch.tensor(tau_prime, device=self.args.device)
 
 
+# FedMTL
+class LocalUpdateFedMTL(object):
+    """
+    FedMTL client: trains both classification model and CVAE.
+    - Classification: CE loss, initialized from global M_g
+    - CVAE: reconstruction + KL loss, fresh initialization per task (per paper)
+    """
+
+    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
+        self.args = args
+        self.loss_func = nn.CrossEntropyLoss()
+        self.selected_clients = []
+        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
+        self.pretrain = pretrain
+        self.task = task
+
+    def _cvae_loss(self, x_recon, x, mu, logvar):
+        """CVAE loss: reconstruction + KL divergence."""
+        recon_loss = F.mse_loss(x_recon, x, reduction='sum')
+        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        return recon_loss + kl_loss
+
+    def train(self, net, cvae, lr, idx=-1, local_eps=None):
+        net.train()
+        cvae.train()
+
+        optimizer_net = torch.optim.SGD(net.parameters(), lr=lr,
+                                        momentum=self.args.momentum,
+                                        weight_decay=self.args.wd)
+        cvae_lr = getattr(self.args, 'cvae_lr', 1e-3)
+        optimizer_cvae = torch.optim.Adam(cvae.parameters(), lr=cvae_lr)
+
+        epoch_loss = []
+        if local_eps is None:
+            local_eps = self.args.local_ep_pretrain if self.pretrain else self.args.local_ep
+
+        for _ in range(local_eps):
+            batch_loss = []
+            for images, labels in self.ldr_train:
+                images, labels = images.to(self.args.device), labels.to(self.args.device)
+                c = F.one_hot(labels, num_classes=self.args.num_classes).float()
+
+                # 1. Train classification model (CE loss)
+                logits = net(images)
+                ce_loss = self.loss_func(logits, labels)
+                optimizer_net.zero_grad()
+                ce_loss.backward()
+                optimizer_net.step()
+
+                # 2. Train CVAE (reconstruction + KL)
+                x_recon, mu, logvar = cvae(images, c)
+                cvae_loss = self._cvae_loss(x_recon, images, mu, logvar) / images.size(0)
+                optimizer_cvae.zero_grad()
+                cvae_loss.backward()
+                optimizer_cvae.step()
+
+                total_loss = ce_loss.item() + cvae_loss.item()
+                batch_loss.append(total_loss)
+
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+
+        return net.state_dict(), cvae.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
 
+# ==================== FedTA: ResNetFedTA (Adapter-based, no hooks) ====================
+
+def _is_resnet_fedta(net):
+    """Check if net is FedTA-based (ResNetFedTA, TextCNNFedTA, or GenericFedTA)."""
+    real = net.module if hasattr(net, 'module') else net
+    return hasattr(real, 'fedta_adapter') and hasattr(real, 'state_dict_fedta')
+
+
+class ESAModule(nn.Module):
+    """
+    Early-Stage Adaptation module for FedTA (Zero-Init Growth).
+    IE_bank zero-initialized; esa_gate starts closed (sigmoid(-6)≈0.002).
+    Conditional residual: x_enhanced = x_stem + 0.1 * gate * enhancement.
+    """
+    def __init__(self, num_ie, stem_channels=64, tau=0.1, device='cuda'):
+        super().__init__()
+        self.num_ie = num_ie
+        self.stem_channels = stem_channels
+        self.tau = tau
+        self.device = device
+        self.ie_bank = nn.Parameter(torch.zeros(num_ie, stem_channels, 1, 1))
+        self.keys = nn.Parameter(torch.randn(num_ie, stem_channels) * 0.01)
+        self.esa_gate = nn.Parameter(torch.tensor(-6.0))  # sigmoid(-6)≈0.002, initially off
+        self._last_q = None
+        self._last_w = None
+
+    def forward(self, x_stem):
+        # x_stem: [B, 64, H, W]
+        B, C, H, W = x_stem.shape
+        q = F.adaptive_avg_pool2d(x_stem, 1).view(B, -1)  # [B, 64]
+        self._last_q = q
+
+        # Key similarity: s_m = cos_sim(q, K_m), eps for numerical stability
+        q_norm = F.normalize(q, p=2, dim=1, eps=1e-6)
+        k_norm = F.normalize(self.keys, p=2, dim=1, eps=1e-6)
+        sim = torch.mm(q_norm, k_norm.t())  # [B, M]
+        w = F.softmax(sim / self.tau, dim=1)  # [B, M]
+        self._last_w = w
+
+        # Conditional residual: gate starts closed, grows with training
+        gate = torch.sigmoid(self.esa_gate)
+        ie_expand = self.ie_bank.unsqueeze(0)  # [1, M, 64, 1, 1]
+        w_expand = w.unsqueeze(2).unsqueeze(3).unsqueeze(4)  # [B, M, 1, 1, 1]
+        enhancement = (ie_expand * w_expand).sum(dim=1)  # [B, 64, 1, 1]
+        x_enhanced = x_stem + 0.1 * gate * enhancement
+        return x_enhanced
+
+    def get_key_loss(self, top_n=3):
+        """L_key = sum over top-N keys of ||K_m - q||^2 (per batch, mean over batch)"""
+        if self._last_q is None or self._last_w is None:
+            return torch.tensor(0.0, device=self.ie_bank.device)
+        q = self._last_q  # [B, 64]
+        w = self._last_w  # [B, M]
+        n = min(top_n, self.num_ie)
+        _, top_idx = torch.topk(w, n, dim=1)  # [B, n]
+        loss_list = []
+        for i in range(n):
+            k_idx = top_idx[:, i]  # [B]
+            K_m = self.keys[k_idx]  # [B, 64]
+            loss_list.append(((q - K_m) ** 2).sum(dim=1))
+        loss = torch.stack(loss_list, dim=1).sum(dim=1).mean() / (n + 1e-8)
+        return loss
+
+    def state_dict_esa(self):
+        return {
+            'ie_bank': self.ie_bank.data.clone(),
+            'keys': self.keys.data.clone(),
+            'esa_gate': self.esa_gate.data.clone()
+        }
+
+    def load_state_dict_esa(self, state):
+        self.ie_bank.data.copy_(state['ie_bank'])
+        self.keys.data.copy_(state['keys'])
+        if 'esa_gate' in state:
+            self.esa_gate.data.copy_(state['esa_gate'])
+
+
+class LocalUpdateFedTA(object):
+    """
+    FedTA client: ESA via forward hook, Tail Anchor mixing, L_CE + L_cons + L_key.
+    Non-intrusive: does not modify ResNet source; hook removed after training.
+    """
+    def __init__(self, args, anchor=None, dataset=None, idxs=None, task=0, pretrain=False):
+        self.args = args
+        self.loss_func = nn.CrossEntropyLoss()
+        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
+        self.pretrain = pretrain
+        self.task = task
+        self.num_classes = args.num_classes
+        self.anchor = anchor.to(args.device) if anchor is not None else None
+
+        # FedTA hyperparams (Zero-Init Growth)
+        self.num_ie = getattr(args, 'num_ie', 10)
+        self.lambda1 = getattr(args, 'fedta_lambda1', 0.1)
+        self.lambda2 = getattr(args, 'fedta_lambda2', 0.01)
+        self.tau = getattr(args, 'fedta_tau', 0.1)
+        self.tau_c = getattr(args, 'fedta_tau_c', 0.1)
+        self.beta_init_logit = getattr(args, 'fedta_beta_init_logit', -4.0)  # sigmoid(-4)≈0.018
+        self.progressive_rounds = getattr(args, 'fedta_progressive_rounds', 0)
+
+    def _get_layer1(self, net):
+        real = net.module if hasattr(net, 'module') else net
+        if hasattr(real, 'layer1'):
+            return real.layer1
+        if hasattr(real, 'backbone') and hasattr(real.backbone, 'layer1'):
+            return real.backbone.layer1
+        raise ValueError("FedTA requires ResNet with layer1 (resnet18/resnet18_imagenet)")
+
+    def _get_feat_dim(self, net):
+        real = net.module if hasattr(net, 'module') else net
+        if hasattr(real, 'linear') and hasattr(real.linear, 'in_features'):
+            return real.linear.in_features
+        return 512
+
+    def _forward_with_ta(self, net, images, labels, tail_anchors, beta):
+        """Forward: f_TA = (1-alpha)*f + alpha*A_y (interpolation), alpha=sigmoid(beta)."""
+        real = net.module if hasattr(net, 'module') else net
+        features = real.extract_features(images)  # [B, 512]
+        alpha = torch.sigmoid(beta)
+        A_y = tail_anchors[labels]  # [B, 512]
+        f_ta = (1 - alpha) * features + alpha * A_y
+        logits = real.only_liner(f_ta)
+        return logits, f_ta, features, alpha
+
+    def train(self, net, anchor=None, global_prototypes=None, kb_state=None, lr=None, round_idx=0, idx=-1, local_eps=None):
+        net.train()
+        device = self.args.device
+        lr = lr if lr is not None else self.args.lr
+        local_eps = local_eps or self.args.local_ep
+
+        real = net.module if hasattr(net, 'module') else net
+        layer1 = self._get_layer1(net)
+        feat_dim = self._get_feat_dim(net)
+
+        # Residual Anchor: server anchor as baseline, local delta init 0
+        A_base = (anchor if anchor is not None else self.anchor).to(device)
+        if A_base is None:
+            A_base = torch.randn(self.num_classes, feat_dim, device=device) * 0.01
+        A_base = A_base.clone().detach()
+        delta_A = nn.Parameter(torch.zeros_like(A_base))
+        # beta init: sigmoid(-4)≈0.018, model initially relies on ResNet features
+        beta = nn.Parameter(torch.tensor(self.beta_init_logit, device=device))
+
+        # ESA module and hook
+        esa = ESAModule(self.num_ie, stem_channels=64, tau=self.tau, device=device).to(device)
+        if kb_state is not None:
+            esa.load_state_dict_esa(kb_state)
+
+        def esa_hook_fn(module, input_tuple):
+            x = input_tuple[0]
+            x_enh = esa(x)
+            return (x_enh,)
+
+        handle = layer1.register_forward_pre_hook(esa_hook_fn)
+
+        # Freeze layer1, layer2
+        for name, p in real.named_parameters():
+            if 'layer1' in name or 'layer2' in name:
+                p.requires_grad = False
+
+        # Progressive: first N rounds train only ESA + classifier
+        if round_idx < self.progressive_rounds:
+            for name, p in real.named_parameters():
+                if 'layer3' in name or 'layer4' in name:
+                    p.requires_grad = False
+
+        # Trainable: ESA, delta_A, beta, layer3-4, linear
+        train_params = list(esa.parameters()) + [delta_A, beta]
+        train_params += [p for name, p in real.named_parameters() if p.requires_grad]
+        optimizer = torch.optim.SGD(train_params, lr=lr, momentum=self.args.momentum, weight_decay=self.args.wd)
+
+        epoch_loss = []
+        G = global_prototypes  # [num_classes, feat_dim] for L_cons
+        if G is not None:
+            G = G.to(device)
+            g_norm = G.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            G = G / g_norm  # safe normalize, zero rows stay zero
+
+        for _ in range(local_eps):
+            batch_loss = []
+            for images, labels in self.ldr_train:
+                images, labels = images.to(device), labels.to(device)
+                optimizer.zero_grad()
+
+                tail_anchors = A_base + torch.tanh(delta_A) * 0.1
+                logits, f_ta, _, alpha = self._forward_with_ta(net, images, labels, tail_anchors, beta)
+                l_ce = self.loss_func(logits, labels)
+
+                # L_cons: contrastive with global prototypes
+                l_cons = torch.tensor(0.0, device=device)
+                if G is not None:
+                    f_norm = F.normalize(f_ta, p=2, dim=1, eps=1e-6)
+                    logits_c = torch.mm(f_norm, G.t()) / self.tau_c
+                    l_cons = F.cross_entropy(logits_c, labels)
+
+                l_key = esa.get_key_loss(top_n=3)
+
+                # Adaptive loss: L_cons and L_key scale with alpha (early training CE-dominated)
+                alpha_val = alpha.detach().mean()
+                lambda1_eff = self.lambda1 * alpha_val
+                lambda2_eff = self.lambda2 * alpha_val
+                loss = l_ce + lambda1_eff * l_cons + lambda2_eff * l_key
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(train_params, max_norm=1.0)
+                optimizer.step()
+                batch_loss.append(loss.item())
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+
+        # Compute local prototypes P_k^y
+        prototypes = {}
+        net.eval()
+        with torch.no_grad():
+            tail_anchors = A_base + torch.tanh(delta_A) * 0.1
+            for images, labels in self.ldr_train:
+                images, labels = images.to(device), labels.to(device)
+                _, f_ta, _, _ = self._forward_with_ta(net, images, labels, tail_anchors, beta)
+                for y in labels.unique():
+                    y_val = y.item()
+                    mask = labels == y
+                    if mask.sum() > 0:
+                        proto = f_ta[mask].mean(dim=0).cpu()
+                        if y_val not in prototypes:
+                            prototypes[y_val] = []
+                        prototypes[y_val].append(proto)
+        for y in prototypes:
+            prototypes[y] = torch.stack(prototypes[y]).mean(dim=0)
+
+        # Remove hook
+        handle.remove()
+
+        # Load tail_anchors into net for state_dict return (we return model state without TA params)
+        w_net = real.state_dict()
+        kb_state = esa.state_dict_esa()
+
+        return w_net, kb_state, prototypes, sum(epoch_loss) / len(epoch_loss)
+
+
+class LocalUpdateFedTAAdapter(object):
+    """
+    FedTA client for ResNetFedTA (adapter-based, no hooks).
+    All layers train, weight_decay 5e-4, grad clip 5.0.
+    Prototypes: confidence filter (prob > 0.6).
+    """
+    def __init__(self, args, anchor=None, dataset=None, idxs=None, task=0, pretrain=False):
+        self.args = args
+        self.loss_func = nn.CrossEntropyLoss()
+        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
+        self.task = task
+        self.num_classes = args.num_classes
+        self.anchor = anchor.to(args.device) if anchor is not None else None
+        self.lambda1 = getattr(args, 'fedta_lambda1', 0.1)
+        self.tau_c = getattr(args, 'fedta_tau_c', 0.1)
+        self.proto_threshold = getattr(args, 'fedta_proto_threshold', 0.6)
+
+    def train(self, net, anchor=None, global_prototypes=None, kb_state=None, lr=None, round_idx=0, idx=-1, local_eps=None):
+        net.train()
+        device = self.args.device
+        lr = lr if lr is not None else self.args.lr
+        local_eps = local_eps or self.args.local_ep
+
+        real = net.module if hasattr(net, 'module') else net
+        if not _is_resnet_fedta(net):
+            raise ValueError("LocalUpdateFedTAAdapter requires ResNetFedTA (use get_fedta_model)")
+
+        if anchor is not None:
+            real.tail_anchors.data.copy_(anchor.to(device))
+        if kb_state is not None:
+            real.load_state_dict_fedta(kb_state)
+
+        # Hard freeze: conv1, bn1, layer1, layer2, layer3 stay fixed every round (for ResNet).
+        # For TextCNN and other models, we train all base parameters with a lower lr.
+        # Only layer4, the linear head, the FedTA adapter, tail_anchors, beta, and
+        # ie_keys are updated — approximating FedTA's "frozen backbone" assumption.
+        _freeze_prefixes = ('conv1', 'bn1', 'layer1', 'layer2', 'layer3')
+
+        # Check if this is a ResNet-based model (has the layer structure)
+        is_resnet = any(hasattr(real.base, layer) for layer in ['layer1', 'layer2', 'layer3', 'layer4'])
+
+        if is_resnet:
+            for name, p in real.base.named_parameters():
+                p.requires_grad = not any(
+                    name == prefix or name.startswith(prefix + '.')
+                    for prefix in _freeze_prefixes
+                )
+
+        wd = getattr(self.args, 'fedta_wd', 5e-4)
+        param_groups = [
+            # FedTA-specific: adapter, tail anchors, blending coefficient, IE keys
+            {'params': list(real.fedta_adapter.parameters()) + [real.tail_anchors, real.beta, real.ie_keys], 'lr': lr * 0.1},
+        ]
+
+        # For ResNet: only train layer4 + linear (requires_grad filters out frozen layers)
+        # For TextCNN/others: train all base parameters with reduced lr
+        if is_resnet:
+            param_groups.append(
+                # Trainable base: layer4 + linear classifier
+                {'params': [p for p in real.base.parameters() if p.requires_grad], 'lr': lr}
+            )
+        else:
+            # Non-ResNet models: train all base params with reduced lr
+            param_groups.append(
+                {'params': [p for p in real.base.parameters()], 'lr': lr * 0.5}
+            )
+        optimizer = torch.optim.SGD(param_groups, momentum=0.9, weight_decay=wd)
+
+        epoch_loss = []
+        G = global_prototypes
+        if G is not None:
+            G = G.to(device)
+            g_norm = G.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            G = G / g_norm
+
+        for _ in range(local_eps):
+            batch_loss = []
+            for images, labels in self.ldr_train:
+                images, labels = images.to(device), labels.to(device)
+                optimizer.zero_grad()
+                logits, f = net(images, return_features=True)
+                l_ce = self.loss_func(logits, labels)
+                l_cons = torch.tensor(0.0, device=device)
+                if G is not None:
+                    f_norm = F.normalize(f, p=2, dim=1, eps=1e-6)
+                    logits_c = torch.mm(f_norm, G.t()) / self.tau_c
+                    l_cons = F.cross_entropy(logits_c, labels)
+                loss = l_ce + self.lambda1 * l_cons
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=5.0)
+                optimizer.step()
+                batch_loss.append(loss.item())
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+
+        prototypes = self._compute_prototypes_safe(net, device)
+        return net.state_dict(), real.state_dict_fedta(), prototypes, sum(epoch_loss) / len(epoch_loss)
+
+    def _compute_prototypes_safe(self, net, device):
+        """Only use high-confidence (correct & prob > threshold) samples."""
+        prototypes = {}
+        net.eval()
+        th = self.proto_threshold
+        with torch.no_grad():
+            for images, labels in self.ldr_train:
+                images, labels = images.to(device), labels.to(device)
+                logits, f = net(images, return_features=True)
+                probs = F.softmax(logits, dim=1)
+                max_prob, pred = probs.max(dim=1)
+                mask = (pred == labels) & (max_prob > th)
+                for y in labels.unique():
+                    y_val = y.item()
+                    y_mask = (labels == y) & mask
+                    if y_mask.sum() > 0:
+                        proto = f[y_mask].mean(dim=0).cpu()
+                        if y_val not in prototypes:
+                            prototypes[y_val] = []
+                        prototypes[y_val].append(proto)
+        for y in prototypes:
+            prototypes[y] = torch.stack(prototypes[y]).mean(dim=0)
+        return prototypes
+
+
+class LocalUpdateLWF(object):
+    """
+    Learning without Forgetting (LwF) Local Update for Federated Learning.
+    
+    Implements knowledge distillation to preserve old task knowledge while learning new tasks.
+    The algorithm uses only new task data for training, without requiring old task data.
+    
+    Loss function:
+    L = L_new + λ_o * L_old + R(θ)
+    where:
+    - L_new: Cross-entropy loss for new task
+    - L_old: Knowledge distillation loss for old tasks
+    - R(θ): Weight decay regularization
+    """
+    
+    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
+        self.args = args
+        self.loss_func = nn.CrossEntropyLoss()
+        self.selected_clients = []
+        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
+        self.pretrain = pretrain
+        
+        # LwF specific attributes
+        self.old_model_state = None  # Store complete old model state dict
+        self.old_task_classes = None  # Store class indices for old task
+        self.temperature = getattr(args, 'lwf_temperature', 2)
+        self.lambda_old = getattr(args, 'lwf_lambda', 1.0)
+        self.warmup_epochs = getattr(args, 'lwf_warmup_epochs', 0)
+        
+    def record_old_outputs(self, net):
+        """
+        Record the old model state for knowledge distillation.
+        This should be called before task switch using the old model.
+        We store the entire model state rather than just outputs,
+        because different tasks may have different output dimensions.
+        
+        Args:
+            net: The old model (before learning new task)
+        """
+        # Store a copy of the old model's state dict
+        self.old_model_state = copy.deepcopy(net.state_dict())
+        
+    def distillation_loss(self, old_logits, new_logits, class_mask=None):
+        """
+        Compute knowledge distillation loss (L_old).
+        
+        L_old = -sum(y_o' * log(y_hat_o'))
+        
+        where y_o' and y_hat_o' are temperature-scaled softmax outputs.
+        Only computed on classes that belong to the old task.
+        
+        Args:
+            old_logits: Old model logits (before temperature scaling)
+            new_logits: New model logits
+            class_mask: Boolean mask indicating which classes to include in distillation
+            
+        Returns:
+            Knowledge distillation loss scaled by T^2
+        """
+        # Temperature-scaled softmax for both old and new
+        old_log_probs = F.log_softmax(old_logits / self.temperature, dim=1)
+        new_log_probs = F.log_softmax(new_logits / self.temperature, dim=1)
+        
+        # Apply class mask if provided (only compute distillation on old task's classes)
+        if class_mask is not None:
+            # Mask shape: [num_classes]
+            # Expand to batch size: [batch_size, num_classes]
+            mask_expanded = class_mask.unsqueeze(0).expand(old_log_probs.size(0), -1)
+            
+            # Zero out non-old-task classes
+            old_log_probs = old_log_probs * mask_expanded
+            new_log_probs = new_log_probs * mask_expanded
+            
+            # Normalize masked probabilities
+            old_probs = torch.exp(old_log_probs)
+            old_probs_sum = old_probs.sum(dim=1, keepdim=True) + 1e-8
+            old_log_probs = torch.log(old_probs / old_probs_sum)
+        
+        # KL divergence between old and new distributions
+        # D_KL(old || new) = sum(old * (log(old) - log(new)))
+        kl_div = F.kl_div(new_log_probs, old_log_probs, reduction='batchmean', log_target=True)
+        
+        # Scale by T^2 as per Hinton's distillation paper
+        return kl_div * (self.temperature ** 2)
+    
+    def train(self, net, lr, idx=-1, local_eps=None):
+        """
+        Train with LwF algorithm.
+        
+        L = L_new + λ_o * L_old + R(θ)
+        
+        Args:
+            net: Local model
+            lr: Learning rate
+            idx: Client index
+            local_eps: Number of local epochs
+            
+        Returns:
+            Tuple of (model state dict, average loss)
+        """
+        net.train()
+        
+        # Initialize optimizer with weight decay (R(θ) in LwF)
+        optimizer = torch.optim.SGD(net.parameters(), lr=lr,
+                                    momentum=self.args.momentum,
+                                    weight_decay=self.args.wd)
+        
+        epoch_loss = []
+        
+        if local_eps is None:
+            if self.pretrain:
+                local_eps = self.args.local_ep_pretrain
+            else:
+                local_eps = self.args.local_ep
+        
+        # Check if we have an old model for distillation
+        has_old_model = self.old_model_state is not None
+        
+        # Create old model if needed
+        if has_old_model:
+            from utils.train_utils import get_model
+            old_net = get_model(self.args)
+            old_net.load_state_dict(self.old_model_state)
+            old_net.to(self.args.device)
+            old_net.eval()
+        
+        for iter in range(local_eps):
+            batch_loss = []
+            for batch_idx, (images, labels) in enumerate(self.ldr_train):
+                images, labels = images.to(self.args.device), labels.to(self.args.device)
+                
+                # Forward pass
+                logits = net(images)
+                
+                # New task loss (L_new): Cross-entropy
+                ce_loss = self.loss_func(logits, labels)
+                
+                # Old task loss (L_old): Knowledge distillation
+                kd_loss = torch.tensor(0.0, device=self.args.device)
+                if has_old_model:
+                    with torch.no_grad():
+                        old_logits = old_net(images)
+                    # Create class mask for old task's classes
+                    if self.old_task_classes is not None:
+                        num_classes = self.args.num_classes
+                        class_mask = torch.zeros(num_classes, dtype=torch.float32, device=self.args.device)
+                        class_mask[self.old_task_classes] = 1.0
+                        kd_loss = self.distillation_loss(old_logits, logits, class_mask)
+                    else:
+                        kd_loss = self.distillation_loss(old_logits, logits)
+                
+                # Total loss: L = L_new + λ_o * L_old
+                total_loss = ce_loss + self.lambda_old * kd_loss
+                
+                # Backward pass
+                optimizer.zero_grad()
+                total_loss.backward()
+                optimizer.step()
+                
+                batch_loss.append(total_loss.item())
+            
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+        
+        # Clean up old model
+        if has_old_model:
+            del old_net
+        
+        return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
+
+
+class LocalUpdateFedCLASS(object):
+    """
+    FedCLASS Local Update for Federated Learning (Fixed Label Space Version).
+    
+    Implements self-distillation from the historical global model to constrain
+    local optimization and mitigate client drift in Non-IID scenarios.
+    
+    Loss function:
+    L = L_ce + λ * L_distill
+    where:
+    - L_ce: Cross-entropy loss for supervised learning
+    - L_distill: KL divergence between historical and current model outputs
+    
+    Reference: FedCLASS.md - Algorithm for fixed label space
+    """
+    
+    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
+        self.args = args
+        self.loss_func = nn.CrossEntropyLoss()
+        self.selected_clients = []
+        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
+        self.pretrain = pretrain
+        
+        # FedCLASS specific hyperparameters
+        self.lambda_distill = getattr(args, 'fedclass_lambda', 1.0)
+        self.temperature = getattr(args, 'fedclass_temperature', 2.0)
+        
+    def distillation_loss(self, hist_logits, curr_logits):
+        """
+        Compute self-distillation loss using KL divergence.
+        
+        L_distill = KL(p_hist || p_curr) * T^2
+        where p_hist and p_curr are temperature-scaled softmax outputs.
+        
+        Args:
+            hist_logits: Logits from frozen historical model
+            curr_logits: Logits from current model being trained
+            
+        Returns:
+            KL divergence loss scaled by T^2
+        """
+        # Temperature-scaled log-softmax for both models
+        hist_log_probs = F.log_softmax(hist_logits / self.temperature, dim=1)
+        curr_log_probs = F.log_softmax(curr_logits / self.temperature, dim=1)
+        
+        # KL divergence: D_KL(hist || curr) = sum(hist * (log(hist) - log(curr)))
+        kl_div = F.kl_div(curr_log_probs, hist_log_probs, reduction='batchmean', log_target=True)
+        
+        # Scale by T^2 as per Hinton's distillation paper
+        return kl_div * (self.temperature ** 2)
+    
+    def train(self, net, hist_net_state, lr, idx=-1, local_eps=None):
+        """
+        Train with FedCLASS self-distillation algorithm.
+        
+        L = L_ce + λ * L_distill
+        
+        Args:
+            net: Local model (current model to be trained)
+            hist_net_state: State dict of frozen historical model (previous round's global model)
+            lr: Learning rate
+            idx: Client index
+            local_eps: Number of local epochs
+            
+        Returns:
+            Tuple of (model state dict, average loss)
+        """
+        net.train()
+        
+        # Initialize optimizer
+        optimizer = torch.optim.SGD(net.parameters(), lr=lr,
+                                    momentum=self.args.momentum,
+                                    weight_decay=self.args.wd)
+        
+        epoch_loss = []
+        
+        if local_eps is None:
+            if self.pretrain:
+                local_eps = self.args.local_ep_pretrain
+            else:
+                local_eps = self.args.local_ep
+        
+        # Create and freeze historical model for distillation
+        if hist_net_state is not None:
+            from utils.train_utils import get_model
+            hist_net = get_model(self.args)
+            hist_net.load_state_dict(hist_net_state)
+            hist_net.to(self.args.device)
+            hist_net.eval()
+            has_hist_model = True
+        else:
+            has_hist_model = False
+        
+        for iter in range(local_eps):
+            batch_loss = []
+            for batch_idx, (images, labels) in enumerate(self.ldr_train):
+                images, labels = images.to(self.args.device), labels.to(self.args.device)
+                
+                # Forward pass with current model
+                logits = net(images)
+                
+                # Cross-entropy loss (L_ce)
+                ce_loss = self.loss_func(logits, labels)
+                
+                # Self-distillation loss (L_distill)
+                distill_loss = torch.tensor(0.0, device=self.args.device)
+                if has_hist_model:
+                    with torch.no_grad():
+                        hist_logits = hist_net(images)
+                    distill_loss = self.distillation_loss(hist_logits, logits)
+                
+                # Total loss: L = L_ce + λ * L_distill
+                total_loss = ce_loss + self.lambda_distill * distill_loss
+                
+                # Backward pass
+                optimizer.zero_grad()
+                total_loss.backward()
+                optimizer.step()
+                
+                batch_loss.append(total_loss.item())
+            
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+        
+        # Clean up historical model
+        if has_hist_model:
+            del hist_net
+        
+        return net.state_dict(), sum(epoch_loss) / len(epoch_loss)

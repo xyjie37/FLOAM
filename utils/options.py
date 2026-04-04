@@ -27,7 +27,7 @@ def args_parser():
     parser.add_argument('--task_num', type=int, default=1, help="number of task")
     parser.add_argument('--head_epoch', type=int, default=5, help="number of head epoch")
     # model arguments
-    parser.add_argument('--model', type=str, default='mlp', help='model name')
+    parser.add_argument('--model', type=str, default='mlp', help='model name; use "auto" to auto-select based on dataset')
     parser.add_argument('--kernel_num', type=int, default=9, help='number of each kind of kernel')
     parser.add_argument('--kernel_sizes', type=str, default='3,4,5',
                         help='comma-separated kernel size to use for convolution')
@@ -38,7 +38,7 @@ def args_parser():
     parser.add_argument('--num_layers_keep', type=int, default=1, help='number layers to keep')
 
     # other arguments
-    parser.add_argument('--dataset', type=str, default='mnist', help="name of dataset")
+    parser.add_argument('--dataset', type=str, default='mnist', help="name of dataset (e.g. cifar10, cifar100, imagenet100, tinyimagenet)")
     parser.add_argument('--iid', action='store_true', help='whether i.i.d or not')
     parser.add_argument('--num_classes', type=int, default=10, help="number of classes")
     parser.add_argument('--num_channels', type=int, default=3, help="number of channels of imges")
@@ -92,6 +92,26 @@ def args_parser():
     parser.add_argument('--classes_per_task ', type=int, default=10, help="Student learning rate")
     parser.add_argument('--meta-lr', type=float, default=0.9, help="Student learning rate")
     parser.add_argument('--sample_bs', type = int, default = 32)
-# ...existing code...
+    parser.add_argument('--cvae_lr', type=float, default=1e-3, help="CVAE learning rate for FedMTL")
+
+    # FedTA arguments
+    parser.add_argument('--num_ie', type=int, default=10, help='FedTA: Knowledge Base size M')
+    parser.add_argument('--fedta_lambda1', type=float, default=0.1, help='FedTA: L_cons weight')
+    parser.add_argument('--fedta_lambda2', type=float, default=0.01, help='FedTA: L_key weight')
+    parser.add_argument('--fedta_tau', type=float, default=0.1, help='FedTA: IE softmax temperature')
+    parser.add_argument('--fedta_tau_c', type=float, default=0.1, help='FedTA: contrastive temperature')
+    parser.add_argument('--fedta_beta_init_logit', type=float, default=-4.0, help='FedTA: beta logit init (sigmoid(-4)≈0.018)')
+    parser.add_argument('--fedta_alpha_test', type=float, default=0.018, help='FedTA: alpha for inference (sigmoid(-4)≈0.018)')
+    parser.add_argument('--fedta_thr', type=float, default=0.5, help='FedTA: BGPS stability threshold')
+    parser.add_argument('--fedta_gamma', type=float, default=0.2, help='FedTA: anchor EMA gamma')
+    parser.add_argument('--fedta_progressive_rounds', type=int, default=0, help='FedTA: rounds to train only ESA first (0=train layer3-4 from start)')
+    parser.add_argument('--fedta_proto_threshold', type=float, default=0.6, help='FedTA: BGPS confidence threshold for prototype selection')
+    parser.add_argument('--fedta_wd', type=float, default=5e-4, help='FedTA: weight decay for full training')
+
+    # LwF arguments
+    parser.add_argument('--lwf_temperature', type=float, default=2, help='LwF: temperature for knowledge distillation')
+    parser.add_argument('--lwf_lambda', type=float, default=1.0, help='LwF: balance weight for old task loss')
+    parser.add_argument('--lwf_warmup_epochs', type=int, default=0, help='LwF: warm-up phase epochs (0=disabled)')
+
     args = parser.parse_args()
     return args

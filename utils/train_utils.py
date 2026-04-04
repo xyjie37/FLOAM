@@ -1,10 +1,34 @@
 from torchvision import datasets, transforms
 from models.Nets import CNNCifar, MobileNetCifar, CNNMnist
 from models.ResNet import ResNet18, ResNet50
+from models.ResNetFedTA import ResNetFedTA
 from models.tinyresnet import TinyResNet18
+from models.resnet_imagenet import ResNet18_ImageNet
 from utils.sampling import iid, noniid, iid_unbalanced, noniid_unbalanced
 from models.speechresnet import SpeechResNet18
-from models.TextCNN import TextCNN
+from models.TextCNNFedTA import TextCNNFedTA
+from models.GenericFedTA import GenericFedTA
+
+
+def get_auto_model(dataset):
+    """Return the default model for a given dataset."""
+    if dataset == 'imagenet100':
+        return 'resnet18_imagenet'
+    elif dataset == 'tinyimagenet':
+        return 'tinyresnet18'
+    elif dataset in ['cifar10', 'cifar100', 'cinic10']:
+        return 'resnet18'
+    elif dataset in ['mnist', 'fmnist']:
+        return 'cnn'
+    elif dataset == 'speechcommands':
+        return 'speechresnet'
+    elif dataset == 'yahooanswers':
+        return 'textcnn'
+    elif dataset == 'agnews':
+        return 'textcnn'
+    elif dataset == '20newsgroup':
+        return 'textcnn'
+    return 'resnet18'
 
 trans_mnist = transforms.Compose([transforms.ToTensor(),
                                   transforms.Normalize((0.1307,), (0.3081,))])
@@ -94,6 +118,8 @@ def get_data(args, env='fed'):
         return dataset_train, dataset_test, dict_users_train, dict_users_test
 
 def get_model(args):
+    if args.model == 'auto':
+        args.model = get_auto_model(args.dataset)
     if args.model == 'cnn' and args.dataset in ['cifar10', 'cifar100']:
         net_glob = CNNCifar(args=args).to(args.device)
     elif args.model == 'mobile' and args.dataset in ['cifar10', 'cifar100']:
@@ -102,6 +128,8 @@ def get_model(args):
         net_glob = ResNet18(num_classes=args.num_classes).to(args.device)
     elif args.model == 'tinyresnet18' and args.dataset == 'tinyimagenet':
         net_glob = TinyResNet18(num_classes=args.num_classes).to(args.device)
+    elif args.model == 'resnet18_imagenet' and args.dataset == 'imagenet100':
+        net_glob = ResNet18_ImageNet(num_classes=args.num_classes).to(args.device)
     elif args.model == 'resnet50' and args.dataset in ['cifar10', 'cifar100']:
         net_glob = ResNet50(num_classes=args.num_classes).to(args.device)
     elif args.model == 'cnn' and args.dataset in ['mnist','fmnist']:
@@ -125,3 +153,27 @@ def get_model(args):
         exit('Error: unrecognized model')
 
     return net_glob
+
+
+def get_fedta_model(args):
+    """
+    Get FedTA-wrapped model based on dataset/model type.
+    - textcnn datasets (text): Use TextCNNFedTA
+    - speechresnet/tinyresnet18: Use GenericFedTA
+    - resnet18/resnet50 (image): Use ResNetFedTA (existing)
+    """
+    base = get_model(args)
+    num_ie = getattr(args, 'num_ie', 10)
+
+    # Select appropriate FedTA wrapper based on model type
+    model_name = args.model if hasattr(args, 'model') else 'resnet18'
+
+    if model_name == 'textcnn':
+        # Text datasets use TextCNNFedTA
+        return TextCNNFedTA(base, args.num_classes, num_ie=num_ie)
+    elif model_name in ['speechresnet', 'tinyresnet18']:
+        # Speech and Tiny-ImageNet use GenericFedTA
+        return GenericFedTA(base, args.num_classes, num_ie=num_ie)
+    else:
+        # Image datasets (ResNet) use ResNetFedTA
+        return ResNetFedTA(base, args.num_classes, num_ie=num_ie)
