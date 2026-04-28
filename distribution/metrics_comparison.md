@@ -1,0 +1,349 @@
+# SMI and TDI Metrics Comparison
+
+## Overview
+
+This report compares the mean SMI (Stability Metric Index) and TDI (Task Drift Index) 
+values across three federated learning algorithms on CIFAR-10 and CIFAR-100 datasets.
+
+## Mean Values
+
+### CIFAR10 - SMI Mean Values
+
+| Algorithm | Mean SMI |
+|-----------|----------|
+| CGOFED | 0.0756 |
+| FEDAVG | 0.0757 |
+| FEDCLASS | 0.1209 |
+| FEDEWC | 0.0718 |
+| FEDKNOW | 0.0706 |
+| FEDLWF | 0.0686 |
+| FEDMTL | 0.0743 |
+| FEDPROX | 0.0654 |
+| FEDTA | 0.1677 |
+| FLOAM | 0.0591 |
+| REFED | 0.0810 |
+
+### CIFAR10 - TDI Mean Values
+
+| Algorithm | Mean TDI |
+|-----------|----------|
+| CGOFED | 0.0937 |
+| FEDAVG | 0.0908 |
+| FEDCLASS | 0.1331 |
+| FEDEWC | 0.0913 |
+| FEDKNOW | 0.0900 |
+| FEDLWF | 0.1053 |
+| FEDMTL | 0.1125 |
+| FEDPROX | 0.0919 |
+| FEDTA | 0.2322 |
+| FLOAM | 0.0740 |
+| REFED | 0.0914 |
+
+### CIFAR100 - SMI Mean Values
+
+| Algorithm | Mean SMI |
+|-----------|----------|
+| CGOFED | 0.2263 |
+| FEDAVG | 0.2345 |
+| FEDCLASS | 0.2755 |
+| FEDEWC | 0.2381 |
+| FEDKNOW | 0.2352 |
+| FEDLWF | 0.2387 |
+| FEDMTL | 0.2353 |
+| FEDPROX | 0.2261 |
+| FEDTA | 0.3159 |
+| FLOAM | 0.2238 |
+| REFED | 0.2240 |
+
+### CIFAR100 - TDI Mean Values
+
+| Algorithm | Mean TDI |
+|-----------|----------|
+| CGOFED | 0.2457 |
+| FEDAVG | 0.2573 |
+| FEDCLASS | 0.2968 |
+| FEDEWC | 0.2638 |
+| FEDKNOW | 0.2593 |
+| FEDLWF | 0.2696 |
+| FEDMTL | 0.2551 |
+| FEDPROX | 0.2490 |
+| FEDTA | 0.4053 |
+| FLOAM | 0.2407 |
+| REFED | 0.2510 |
+
+## Pairwise Mean Differences
+
+### CIFAR10 - SMI Pairwise Differences
+
+| Algorithm Pair | Mean SMI Difference |
+|----------------|---------------------|
+| CGOFED vs FEDAVG | 0.0002 |
+| CGOFED vs FEDCLASS | 0.0453 |
+| CGOFED vs FEDEWC | 0.0038 |
+| CGOFED vs FEDKNOW | 0.0050 |
+| CGOFED vs FEDLWF | 0.0069 |
+| CGOFED vs FEDMTL | 0.0013 |
+| CGOFED vs FEDPROX | 0.0102 |
+| CGOFED vs FEDTA | 0.0922 |
+| CGOFED vs FLOAM | 0.0165 |
+| CGOFED vs REFED | 0.0054 |
+| FEDAVG vs FEDCLASS | 0.0451 |
+| FEDAVG vs FEDEWC | 0.0040 |
+| FEDAVG vs FEDKNOW | 0.0052 |
+| FEDAVG vs FEDLWF | 0.0071 |
+| FEDAVG vs FEDMTL | 0.0014 |
+| FEDAVG vs FEDPROX | 0.0103 |
+| FEDAVG vs FEDTA | 0.0920 |
+| FEDAVG vs FLOAM | 0.0166 |
+| FEDAVG vs REFED | 0.0052 |
+| FEDCLASS vs FEDEWC | 0.0491 |
+| FEDCLASS vs FEDKNOW | 0.0503 |
+| FEDCLASS vs FEDLWF | 0.0522 |
+| FEDCLASS vs FEDMTL | 0.0466 |
+| FEDCLASS vs FEDPROX | 0.0554 |
+| FEDCLASS vs FEDTA | 0.0469 |
+| FEDCLASS vs FLOAM | 0.0618 |
+| FEDCLASS vs REFED | 0.0399 |
+| FEDEWC vs FEDKNOW | 0.0012 |
+| FEDEWC vs FEDLWF | 0.0031 |
+| FEDEWC vs FEDMTL | 0.0025 |
+| FEDEWC vs FEDPROX | 0.0064 |
+| FEDEWC vs FEDTA | 0.0960 |
+| FEDEWC vs FLOAM | 0.0127 |
+| FEDEWC vs REFED | 0.0092 |
+| FEDKNOW vs FEDLWF | 0.0019 |
+| FEDKNOW vs FEDMTL | 0.0037 |
+| FEDKNOW vs FEDPROX | 0.0051 |
+| FEDKNOW vs FEDTA | 0.0972 |
+| FEDKNOW vs FLOAM | 0.0114 |
+| FEDKNOW vs REFED | 0.0104 |
+| FEDLWF vs FEDMTL | 0.0057 |
+| FEDLWF vs FEDPROX | 0.0032 |
+| FEDLWF vs FEDTA | 0.0991 |
+| FEDLWF vs FLOAM | 0.0095 |
+| FEDLWF vs REFED | 0.0123 |
+| FEDMTL vs FEDPROX | 0.0089 |
+| FEDMTL vs FEDTA | 0.0935 |
+| FEDMTL vs FLOAM | 0.0152 |
+| FEDMTL vs REFED | 0.0067 |
+| FEDPROX vs FEDTA | 0.1023 |
+| FEDPROX vs FLOAM | 0.0063 |
+| FEDPROX vs REFED | 0.0156 |
+| FEDTA vs FLOAM | 0.1086 |
+| FEDTA vs REFED | 0.0868 |
+| FLOAM vs REFED | 0.0219 |
+
+### CIFAR10 - TDI Pairwise Differences
+
+| Algorithm Pair | Mean TDI Difference |
+|----------------|---------------------|
+| CGOFED vs FEDAVG | 0.0028 |
+| CGOFED vs FEDCLASS | 0.0394 |
+| CGOFED vs FEDEWC | 0.0024 |
+| CGOFED vs FEDKNOW | 0.0037 |
+| CGOFED vs FEDLWF | 0.0116 |
+| CGOFED vs FEDMTL | 0.0188 |
+| CGOFED vs FEDPROX | 0.0018 |
+| CGOFED vs FEDTA | 0.1386 |
+| CGOFED vs FLOAM | 0.0197 |
+| CGOFED vs REFED | 0.0023 |
+| FEDAVG vs FEDCLASS | 0.0423 |
+| FEDAVG vs FEDEWC | 0.0004 |
+| FEDAVG vs FEDKNOW | 0.0009 |
+| FEDAVG vs FEDLWF | 0.0144 |
+| FEDAVG vs FEDMTL | 0.0216 |
+| FEDAVG vs FEDPROX | 0.0011 |
+| FEDAVG vs FEDTA | 0.1414 |
+| FEDAVG vs FLOAM | 0.0169 |
+| FEDAVG vs REFED | 0.0005 |
+| FEDCLASS vs FEDEWC | 0.0418 |
+| FEDCLASS vs FEDKNOW | 0.0432 |
+| FEDCLASS vs FEDLWF | 0.0279 |
+| FEDCLASS vs FEDMTL | 0.0206 |
+| FEDCLASS vs FEDPROX | 0.0412 |
+| FEDCLASS vs FEDTA | 0.0991 |
+| FEDCLASS vs FLOAM | 0.0592 |
+| FEDCLASS vs REFED | 0.0418 |
+| FEDEWC vs FEDKNOW | 0.0013 |
+| FEDEWC vs FEDLWF | 0.0140 |
+| FEDEWC vs FEDMTL | 0.0212 |
+| FEDEWC vs FEDPROX | 0.0006 |
+| FEDEWC vs FEDTA | 0.1410 |
+| FEDEWC vs FLOAM | 0.0173 |
+| FEDEWC vs REFED | 0.0001 |
+| FEDKNOW vs FEDLWF | 0.0153 |
+| FEDKNOW vs FEDMTL | 0.0225 |
+| FEDKNOW vs FEDPROX | 0.0020 |
+| FEDKNOW vs FEDTA | 0.1423 |
+| FEDKNOW vs FLOAM | 0.0160 |
+| FEDKNOW vs REFED | 0.0014 |
+| FEDLWF vs FEDMTL | 0.0072 |
+| FEDLWF vs FEDPROX | 0.0133 |
+| FEDLWF vs FEDTA | 0.1270 |
+| FEDLWF vs FLOAM | 0.0313 |
+| FEDLWF vs REFED | 0.0139 |
+| FEDMTL vs FEDPROX | 0.0206 |
+| FEDMTL vs FEDTA | 0.1198 |
+| FEDMTL vs FLOAM | 0.0385 |
+| FEDMTL vs REFED | 0.0211 |
+| FEDPROX vs FEDTA | 0.1403 |
+| FEDPROX vs FLOAM | 0.0179 |
+| FEDPROX vs REFED | 0.0005 |
+| FEDTA vs FLOAM | 0.1583 |
+| FEDTA vs REFED | 0.1409 |
+| FLOAM vs REFED | 0.0174 |
+
+### CIFAR100 - SMI Pairwise Differences
+
+| Algorithm Pair | Mean SMI Difference |
+|----------------|---------------------|
+| CGOFED vs FEDAVG | 0.0081 |
+| CGOFED vs FEDCLASS | 0.0492 |
+| CGOFED vs FEDEWC | 0.0118 |
+| CGOFED vs FEDKNOW | 0.0089 |
+| CGOFED vs FEDLWF | 0.0124 |
+| CGOFED vs FEDMTL | 0.0090 |
+| CGOFED vs FEDPROX | 0.0002 |
+| CGOFED vs FEDTA | 0.0896 |
+| CGOFED vs FLOAM | 0.0025 |
+| CGOFED vs REFED | 0.0023 |
+| FEDAVG vs FEDCLASS | 0.0410 |
+| FEDAVG vs FEDEWC | 0.0037 |
+| FEDAVG vs FEDKNOW | 0.0008 |
+| FEDAVG vs FEDLWF | 0.0042 |
+| FEDAVG vs FEDMTL | 0.0008 |
+| FEDAVG vs FEDPROX | 0.0084 |
+| FEDAVG vs FEDTA | 0.0814 |
+| FEDAVG vs FLOAM | 0.0106 |
+| FEDAVG vs REFED | 0.0105 |
+| FEDCLASS vs FEDEWC | 0.0374 |
+| FEDCLASS vs FEDKNOW | 0.0403 |
+| FEDCLASS vs FEDLWF | 0.0368 |
+| FEDCLASS vs FEDMTL | 0.0402 |
+| FEDCLASS vs FEDPROX | 0.0494 |
+| FEDCLASS vs FEDTA | 0.0404 |
+| FEDCLASS vs FLOAM | 0.0517 |
+| FEDCLASS vs REFED | 0.0515 |
+| FEDEWC vs FEDKNOW | 0.0029 |
+| FEDEWC vs FEDLWF | 0.0006 |
+| FEDEWC vs FEDMTL | 0.0028 |
+| FEDEWC vs FEDPROX | 0.0120 |
+| FEDEWC vs FEDTA | 0.0778 |
+| FEDEWC vs FLOAM | 0.0143 |
+| FEDEWC vs REFED | 0.0141 |
+| FEDKNOW vs FEDLWF | 0.0035 |
+| FEDKNOW vs FEDMTL | 0.0001 |
+| FEDKNOW vs FEDPROX | 0.0091 |
+| FEDKNOW vs FEDTA | 0.0807 |
+| FEDKNOW vs FLOAM | 0.0114 |
+| FEDKNOW vs REFED | 0.0112 |
+| FEDLWF vs FEDMTL | 0.0034 |
+| FEDLWF vs FEDPROX | 0.0126 |
+| FEDLWF vs FEDTA | 0.0772 |
+| FEDLWF vs FLOAM | 0.0149 |
+| FEDLWF vs REFED | 0.0147 |
+| FEDMTL vs FEDPROX | 0.0092 |
+| FEDMTL vs FEDTA | 0.0806 |
+| FEDMTL vs FLOAM | 0.0115 |
+| FEDMTL vs REFED | 0.0113 |
+| FEDPROX vs FEDTA | 0.0898 |
+| FEDPROX vs FLOAM | 0.0023 |
+| FEDPROX vs REFED | 0.0021 |
+| FEDTA vs FLOAM | 0.0921 |
+| FEDTA vs REFED | 0.0919 |
+| FLOAM vs REFED | 0.0002 |
+
+### CIFAR100 - TDI Pairwise Differences
+
+| Algorithm Pair | Mean TDI Difference |
+|----------------|---------------------|
+| CGOFED vs FEDAVG | 0.0116 |
+| CGOFED vs FEDCLASS | 0.0511 |
+| CGOFED vs FEDEWC | 0.0181 |
+| CGOFED vs FEDKNOW | 0.0136 |
+| CGOFED vs FEDLWF | 0.0239 |
+| CGOFED vs FEDMTL | 0.0095 |
+| CGOFED vs FEDPROX | 0.0033 |
+| CGOFED vs FEDTA | 0.1596 |
+| CGOFED vs FLOAM | 0.0049 |
+| CGOFED vs REFED | 0.0054 |
+| FEDAVG vs FEDCLASS | 0.0395 |
+| FEDAVG vs FEDEWC | 0.0065 |
+| FEDAVG vs FEDKNOW | 0.0020 |
+| FEDAVG vs FEDLWF | 0.0123 |
+| FEDAVG vs FEDMTL | 0.0021 |
+| FEDAVG vs FEDPROX | 0.0083 |
+| FEDAVG vs FEDTA | 0.1480 |
+| FEDAVG vs FLOAM | 0.0165 |
+| FEDAVG vs REFED | 0.0062 |
+| FEDCLASS vs FEDEWC | 0.0330 |
+| FEDCLASS vs FEDKNOW | 0.0375 |
+| FEDCLASS vs FEDLWF | 0.0272 |
+| FEDCLASS vs FEDMTL | 0.0417 |
+| FEDCLASS vs FEDPROX | 0.0478 |
+| FEDCLASS vs FEDTA | 0.1085 |
+| FEDCLASS vs FLOAM | 0.0561 |
+| FEDCLASS vs REFED | 0.0458 |
+| FEDEWC vs FEDKNOW | 0.0045 |
+| FEDEWC vs FEDLWF | 0.0058 |
+| FEDEWC vs FEDMTL | 0.0087 |
+| FEDEWC vs FEDPROX | 0.0148 |
+| FEDEWC vs FEDTA | 0.1415 |
+| FEDEWC vs FLOAM | 0.0231 |
+| FEDEWC vs REFED | 0.0128 |
+| FEDKNOW vs FEDLWF | 0.0103 |
+| FEDKNOW vs FEDMTL | 0.0042 |
+| FEDKNOW vs FEDPROX | 0.0103 |
+| FEDKNOW vs FEDTA | 0.1460 |
+| FEDKNOW vs FLOAM | 0.0186 |
+| FEDKNOW vs REFED | 0.0083 |
+| FEDLWF vs FEDMTL | 0.0144 |
+| FEDLWF vs FEDPROX | 0.0206 |
+| FEDLWF vs FEDTA | 0.1357 |
+| FEDLWF vs FLOAM | 0.0288 |
+| FEDLWF vs REFED | 0.0185 |
+| FEDMTL vs FEDPROX | 0.0062 |
+| FEDMTL vs FEDTA | 0.1502 |
+| FEDMTL vs FLOAM | 0.0144 |
+| FEDMTL vs REFED | 0.0041 |
+| FEDPROX vs FEDTA | 0.1563 |
+| FEDPROX vs FLOAM | 0.0082 |
+| FEDPROX vs REFED | 0.0021 |
+| FEDTA vs FLOAM | 0.1646 |
+| FEDTA vs REFED | 0.1543 |
+| FLOAM vs REFED | 0.0103 |
+
+## Comprehensive Comparison
+
+### CIFAR10 - Complete Metrics Comparison
+
+| Algorithm | Mean SMI | Mean TDI |
+|-----------|----------|----------|
+| CGOFED | 0.0756 | 0.0937 |
+| FEDAVG | 0.0757 | 0.0908 |
+| FEDCLASS | 0.1209 | 0.1331 |
+| FEDEWC | 0.0718 | 0.0913 |
+| FEDKNOW | 0.0706 | 0.0900 |
+| FEDLWF | 0.0686 | 0.1053 |
+| FEDMTL | 0.0743 | 0.1125 |
+| FEDPROX | 0.0654 | 0.0919 |
+| FEDTA | 0.1677 | 0.2322 |
+| FLOAM | 0.0591 | 0.0740 |
+| REFED | 0.0810 | 0.0914 |
+
+### CIFAR100 - Complete Metrics Comparison
+
+| Algorithm | Mean SMI | Mean TDI |
+|-----------|----------|----------|
+| CGOFED | 0.2263 | 0.2457 |
+| FEDAVG | 0.2345 | 0.2573 |
+| FEDCLASS | 0.2755 | 0.2968 |
+| FEDEWC | 0.2381 | 0.2638 |
+| FEDKNOW | 0.2352 | 0.2593 |
+| FEDLWF | 0.2387 | 0.2696 |
+| FEDMTL | 0.2353 | 0.2551 |
+| FEDPROX | 0.2261 | 0.2490 |
+| FEDTA | 0.3159 | 0.4053 |
+| FLOAM | 0.2238 | 0.2407 |
+| REFED | 0.2240 | 0.2510 |
+

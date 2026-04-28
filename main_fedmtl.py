@@ -19,7 +19,7 @@ from utils.train_utils import get_model
 from utils.data_utils import read_all_test_data
 from models.Update import LocalUpdateFedMTL
 from models.CVAE import CVAE, get_img_shape
-from models.test import test_img, test_img_local_all
+from models.test import test_img, test_img_local_all, compute_smi_tdi_for_task
 import os
 
 # FedMTL hyperparameters
@@ -288,6 +288,9 @@ if __name__ == '__main__':
     best_epoch = None
     results = []
     lr = args.lr
+    prev_client_centroids = None
+    current_smi = np.nan
+    current_tdi = np.nan
 
     for iter in range(args.epochs):
         task = (iter // ROUNDS_PER_TASK) % task_num
@@ -375,7 +378,21 @@ if __name__ == '__main__':
                 best_epoch = iter
                 torch.save(net_glob.state_dict(), os.path.join(base_dir, algo_dir, 'best_model.pt'))
 
-            results.append(np.array([iter, task, loss_avg, loss_test, acc_test, all_acc, best_acc]))
-            pd.DataFrame(np.array(results), columns=['epoch', 'task', 'loss_avg', 'loss_test', 'acc_test', 'all_acc', 'best_acc']).to_csv(results_save_path, index=False)
+            if (iter + 1) % ROUNDS_PER_TASK == 0:
+                current_smi, current_tdi, prev_client_centroids = compute_smi_tdi_for_task(
+                    net_local_list=net_local_list,
+                    args=args,
+                    dataset_test=dataset_path,
+                    task=task,
+                    prev_client_centroids=prev_client_centroids,
+                    num_classes=args.num_classes
+                )
+                tdi_str = 'nan' if np.isnan(current_tdi) else '{:.6f}'.format(current_tdi)
+                print('Task {:3d} SMI: {:.6f}, TDI: {}'.format(task, current_smi, tdi_str))
+            else:
+                current_smi, current_tdi = np.nan, np.nan
+
+            results.append(np.array([iter, task, loss_avg, loss_test, acc_test, all_acc, best_acc, current_smi, current_tdi]))
+            pd.DataFrame(np.array(results), columns=['epoch', 'task', 'loss_avg', 'loss_test', 'acc_test', 'all_acc', 'best_acc', 'smi', 'tdi']).to_csv(results_save_path, index=False)
 
     print('Best model at epoch {}, acc {:.2f}%'.format(best_epoch, best_acc))

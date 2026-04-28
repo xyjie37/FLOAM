@@ -281,6 +281,135 @@ def test_img_local_all(net_local_list, args, dataset_test, task, return_all=Fals
     return acc_test_local.mean(), (acc_test_local*data_ratio_local).sum(), loss_test_local.mean()
     # return (acc_test_local*data_ratio_local).sum(), (loss_test_local*data_ratio_local).sum()
 
+
+def _extract_features_from_net(net_g, data):
+    if hasattr(net_g, "extract_features"):
+        return net_g.extract_features(data)
+
+    # Fallback for models exposing features only via forward(returnFeature=True)
+    try:
+        outputs = net_g(data, returnFeature=True)
+        if isinstance(outputs, (tuple, list)) and len(outputs) >= 2:
+            return outputs[1]
+    except TypeError:
+        pass
+
+    raise AttributeError("Model must implement extract_features() or forward(..., returnFeature=True).")
+
+
+def collect_client_class_centroids(net_local_list, args, dataset_test, task, num_classes=None):
+    if num_classes is None:
+        num_classes = args.num_classes
+
+    client_centroids = []
+    for user_idx in range(args.num_users):
+        net_local = net_local_list[user_idx]
+        net_local.eval()
+        data_loader = load_test_data(dataset_test, task, user_idx, batch_size=args.bs)
+
+        feat_batches = []
+        target_batches = []
+
+        with torch.no_grad():
+            for data, target in data_loader:
+                if args.gpu != -1:
+                    data, target = data.to(args.device), target.to(args.device)
+
+                feat = _extract_features_from_net(net_local, data)
+                # L2-normalize each sample's feature vector
+                feat = F.normalize(feat, p=2, dim=1)
+                feat_batches.append(feat.detach().cpu())
+                target_batches.append(target.detach().cpu())
+
+        if len(feat_batches) == 0:
+            client_centroids.append([None for _ in range(num_classes)])
+            continue
+
+        features = torch.cat(feat_batches, dim=0)
+        targets = torch.cat(target_batches, dim=0)
+
+        class_centroids = []
+        for y in range(num_classes):
+            cls_mask = targets == y
+            if torch.any(cls_mask):
+                # Mean of normalized features, then L2-normalize the prototype
+                proto = features[cls_mask].mean(dim=0)
+                proto = F.normalize(proto.unsqueeze(0), p=2, dim=1).squeeze(0)
+                class_centroids.append(proto)
+            else:
+                class_centroids.append(None)
+
+        client_centroids.append(class_centroids)
+
+    return client_centroids
+
+
+def compute_smi_from_centroids(client_centroids, task_classes):
+    per_class_smi = []
+    for y in task_classes:
+        class_mu = [client_centroids[k][y] for k in range(len(client_centroids)) if client_centroids[k][y] is not None]
+        n_clients = len(class_mu)
+        if n_clients < 2:
+            continue
+
+        class_mu = torch.stack(class_mu, dim=0)
+        # Cosine dissimilarity: 1 - p^T q
+        cos_sim = torch.mm(class_mu, class_mu.t())
+        tri_idx = torch.triu_indices(n_clients, n_clients, offset=1)
+        dissimilarities = 1 - cos_sim[tri_idx[0], tri_idx[1]]
+        per_class_smi.append(dissimilarities.mean().item())
+
+    if len(per_class_smi) == 0:
+        return np.nan
+    return float(np.mean(per_class_smi))
+
+
+def compute_tdi_from_centroids(prev_client_centroids, curr_client_centroids, task_classes):
+    if prev_client_centroids is None:
+        return np.nan
+
+    per_pair_drift = []
+    n_clients = min(len(prev_client_centroids), len(curr_client_centroids))
+    for k in range(n_clients):
+        for y in task_classes:
+            prev_mu = prev_client_centroids[k][y]
+            curr_mu = curr_client_centroids[k][y]
+            if prev_mu is None or curr_mu is None:
+                continue
+            # Cosine dissimilarity: 1 - p^T q
+            cos_sim = torch.dot(prev_mu, curr_mu).item()
+            per_pair_drift.append(1 - cos_sim)
+
+    if len(per_pair_drift) == 0:
+        return np.nan
+    return float(np.mean(per_pair_drift))
+
+
+def compute_smi_tdi_for_task(net_local_list, args, dataset_test, task, prev_client_centroids=None, num_classes=None):
+    if num_classes is None:
+        num_classes = args.num_classes
+
+    # Determine the set of classes belonging to the current task
+    task_num = getattr(args, 'task_num', 1)
+    if task_num > 1:
+        classes_per_task = num_classes // task_num
+        task_classes = list(range(task * classes_per_task, min((task + 1) * classes_per_task, num_classes)))
+    else:
+        task_classes = list(range(num_classes))
+
+    curr_client_centroids = collect_client_class_centroids(
+        net_local_list=net_local_list,
+        args=args,
+        dataset_test=dataset_test,
+        task=task,
+        num_classes=num_classes,
+    )
+
+    smi = compute_smi_from_centroids(curr_client_centroids, task_classes)
+    tdi = compute_tdi_from_centroids(prev_client_centroids, curr_client_centroids, task_classes)
+
+    return smi, tdi, curr_client_centroids
+
 def test_img_avg_all(net_glob, net_local_list, args, dataset_test, return_net=False):
     net_glob_temp = copy.deepcopy(net_glob)
     w_keys_epoch = net_glob.state_dict().keys()

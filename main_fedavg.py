@@ -12,7 +12,7 @@ import torch.nn as nn
 from utils.options import args_parser
 from utils.train_utils import get_data, get_model
 from models.Update import LocalUpdate
-from models.test import test_img, test_img_local, test_img_local_all
+from models.test import test_img, test_img_local, test_img_local_all, compute_smi_tdi_for_task
 import os
 
 import pdb
@@ -68,6 +68,9 @@ if __name__ == '__main__':
 
     lr = args.lr
     results = []
+    prev_client_centroids = None
+    current_smi = np.nan
+    current_tdi = np.nan
     
     for iter in range(args.epochs):
         w_glob = None
@@ -140,10 +143,24 @@ if __name__ == '__main__':
 #                     best_save_path = os.path.join(base_dir, algo_dir, 'best_local_{}.pt'.format(user_idx))
 #                     torch.save(net_local_list[user_idx].state_dict(), best_save_path)
 
-            results.append(np.array([iter,task, loss_avg, loss_test, acc_test, all_acc, best_acc]))
+            if (iter + 1) % 10 == 0:
+                current_smi, current_tdi, prev_client_centroids = compute_smi_tdi_for_task(
+                    net_local_list=net_local_list,
+                    args=args,
+                    dataset_test=dataset_path,
+                    task=task,
+                    prev_client_centroids=prev_client_centroids,
+                    num_classes=args.num_classes
+                )
+                tdi_str = 'nan' if np.isnan(current_tdi) else '{:.6f}'.format(current_tdi)
+                print('Task {:3d} SMI: {:.6f}, TDI: {}'.format(task, current_smi, tdi_str))
+            else:
+                current_smi, current_tdi = np.nan, np.nan
+
+            results.append(np.array([iter,task, loss_avg, loss_test, acc_test, all_acc, best_acc, current_smi, current_tdi]))
             #results.append(np.array([iter, task, loss_avg, all_acc]))
             final_results = np.array(results)
-            final_results = pd.DataFrame(final_results, columns=['epoch','task', 'loss_avg', 'loss_test', 'acc_test',  'all_acc','best_acc'])
+            final_results = pd.DataFrame(final_results, columns=['epoch','task', 'loss_avg', 'loss_test', 'acc_test',  'all_acc','best_acc', 'smi', 'tdi'])
             #final_results = pd.DataFrame(final_results, columns=['epoch','task', 'loss_avg', 'all_acc'])
             final_results.to_csv(results_save_path, index=False)
 

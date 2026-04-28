@@ -11,7 +11,7 @@ import torch.nn as nn
 from utils.options import args_parser
 from utils.train_utils import get_data, get_model
 from models.Update import LocalUpdateFedACD
-from models.test import test_img, test_img_local_all
+from models.test import test_img, test_img_local_all, compute_smi_tdi_for_task
 from create_anchor import create_anchor, agg_func, proto_aggregation
 
 class FedACDServer:
@@ -47,6 +47,9 @@ class FedACDServer:
         self.best_acc = None
         self.best_epoch = None
         self.results = []
+        self.prev_client_centroids = None
+        self.current_smi = np.nan
+        self.current_tdi = np.nan
 
     def _create_initial_anchor(self):
         """根据数据集创建初始锚点"""
@@ -107,7 +110,7 @@ class FedACDServer:
         """保存训练结果"""
         final_results = pd.DataFrame(
             np.array(self.results),
-            columns=['epoch', 'task', 'loss_avg', 'loss_test', 'acc_test', 'all_acc', 'best_acc']
+            columns=['epoch', 'task', 'loss_avg', 'loss_test', 'acc_test', 'all_acc', 'best_acc', 'smi', 'tdi']
         )
         final_results.to_csv(self.results_save_path, index=False)
 
@@ -171,14 +174,30 @@ class FedACDServer:
                     self.best_acc = all_acc
                     self.best_epoch = epoch
                     torch.save(self.net_glob.state_dict(), os.path.join(self.base_dir, 'best_model.pt'))
-                
+
+                if (epoch + 1) % 10 == 0:
+                    self.current_smi, self.current_tdi, self.prev_client_centroids = compute_smi_tdi_for_task(
+                        net_local_list=self.net_local_list,
+                        args=self.args,
+                        dataset_test=self.dataset_path,
+                        task=task,
+                        prev_client_centroids=self.prev_client_centroids,
+                        num_classes=self.args.num_classes
+                    )
+                    tdi_str = 'nan' if np.isnan(self.current_tdi) else '{:.6f}'.format(self.current_tdi)
+                    print('Task {:3d} SMI: {:.6f}, TDI: {}'.format(task, self.current_smi, tdi_str))
+                else:
+                    self.current_smi, self.current_tdi = np.nan, np.nan
+
                 self.results.append([
                     epoch, task, 
                     sum(loss_locals)/len(loss_locals), 
                     loss_test, 
                     acc_test, 
                     all_acc, 
-                    self.best_acc
+                    self.best_acc,
+                    self.current_smi,
+                    self.current_tdi
                 ])
                 self._save_results()
 

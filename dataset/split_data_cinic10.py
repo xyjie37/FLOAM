@@ -1,3 +1,5 @@
+import glob
+import io
 import os.path
 import pandas as pd
 import numpy as np
@@ -13,8 +15,8 @@ num_classes = 10  # CINIC-10 has 10 classes
 alpha = 0.1
 np.random.seed(2266)
 
-# 数据集存储地址
-datasetroot_dir = "/root/cinic10"
+# 数据集存储地址（HF 快照：根目录下 data/*.parquet）
+datasetroot_dir = "/home/jxy/cinic10_hf"
 # 生成数据集存储地址
 basedir = "./cinic10-dir-{}-task-{}".format(alpha, num_task)
 if not os.path.exists(basedir):
@@ -39,15 +41,56 @@ class_to_idx = {
     'truck': 9
 }
 
+def _decode_hf_parquet_image(img_cell):
+    """HF parquet 中 image 列常为 dict: bytes + path，或已是 PIL。"""
+    if isinstance(img_cell, Image.Image):
+        return img_cell.convert('RGB')
+    if isinstance(img_cell, dict):
+        raw = img_cell.get('bytes')
+        if raw:
+            return Image.open(io.BytesIO(raw)).convert('RGB')
+        rel = img_cell.get('path')
+        if rel:
+            cand = os.path.join(os.getcwd(), rel)
+            if os.path.isfile(cand):
+                return Image.open(cand).convert('RGB')
+            raise FileNotFoundError(
+                "parquet 中 image 无 bytes，且相对 path 在当前目录下找不到文件: %s" % rel
+            )
+    raise TypeError("无法解析 image 列类型: %s" % type(img_cell))
+
+
 def load_cinic10(root, train=True, transform=None):
-    dataset_type = 'train' if train else 'valid'
-    root = os.path.join(root, dataset_type)
+    # HF 布局：data/train-*.parquet、data/validation-*.parquet（对应原 valid 目录）
+    split = 'train' if train else 'validation'
+    data_dir = os.path.join(root, 'data')
+    parquet_files = sorted(glob.glob(os.path.join(data_dir, '%s-*.parquet' % split)))
+
     images = []
     labels = []
-    for class_name in os.listdir(root):
-        class_path = os.path.join(root, class_name)
+
+    if parquet_files:
+        for pq_path in parquet_files:
+            df = pd.read_parquet(pq_path, engine='pyarrow')
+            for img_cell, lab in zip(df['image'], df['label']):
+                image = _decode_hf_parquet_image(img_cell)
+                if transform:
+                    image = transform(image)
+                images.append(image.numpy())
+                labels.append(int(lab))
+        return np.array(images), np.array(labels)
+
+    # 旧版按类别子目录：train/ 与 valid/
+    dataset_type = 'train' if train else 'valid'
+    split_root = os.path.join(root, dataset_type)
+    for class_name in os.listdir(split_root):
+        class_path = os.path.join(split_root, class_name)
+        if not os.path.isdir(class_path):
+            continue
         for image_name in os.listdir(class_path):
             image_path = os.path.join(class_path, image_name)
+            if not os.path.isfile(image_path):
+                continue
             image = Image.open(image_path).convert('RGB')
             if transform:
                 image = transform(image)
@@ -187,18 +230,16 @@ for client_id in range(num_client):
 df.to_csv(basedir + "/task-statics.csv")
 
 path = basedir + '/test/'
-all_test_data = {}
+all_test_x, all_test_y = [], []
 for client_id in range(num_client):
     for task in range(num_task):
         file = path + 'client-' + str(client_id) + '-task-' + str(task) + '.npz'
         with open(file, 'rb') as f:
             data = np.load(f, allow_pickle=True)['data'].tolist()
-            if 'x' not in all_test_data.keys():
-                all_test_data['x'] = data['x']
-                all_test_data['y'] = data['y']
-            else:
-                all_test_data['x'] = np.concatenate((all_test_data['x'], data['x']))
-                all_test_data['y'] = np.concatenate((all_test_data['y'], data['y']))
+        all_test_x.append(data['x'])
+        all_test_y.append(data['y'])
+
+all_test_data = {'x': np.concatenate(all_test_x, axis=0), 'y': np.concatenate(all_test_y, axis=0)}
 
 test_path = basedir + "/test/test-data"
 

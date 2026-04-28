@@ -10,7 +10,7 @@ from collections import defaultdict
 from utils.options import args_parser
 from utils.train_utils import get_data, get_model
 from models.Update import LocalUpdateRifFiL
-from models.test import test_img, test_img_local, test_img_local_all
+from models.test import test_img, test_img_local, test_img_local_all, compute_smi_tdi_for_task
 import os
 
 class GlobalPromptManager:
@@ -261,6 +261,9 @@ if __name__ == '__main__':
     best_epoch = None
     lr = args.lr
     results = []
+    prev_client_centroids = None
+    current_smi = np.nan
+    current_tdi = np.nan
     
     for round_idx in range(args.epochs):
         print(f"\n===== Round {round_idx+1}/{args.epochs} =====")
@@ -301,10 +304,25 @@ if __name__ == '__main__':
                     
                 print(f"New best model saved! Accuracy: {best_acc:.2f}%")
 
+            task = (round_idx // 10) % args.task_num
+            if (round_idx + 1) % 10 == 0:
+                current_smi, current_tdi, prev_client_centroids = compute_smi_tdi_for_task(
+                    net_local_list=server.client_models,
+                    args=args,
+                    dataset_test=dataset_path,
+                    task=task,
+                    prev_client_centroids=prev_client_centroids,
+                    num_classes=args.num_classes
+                )
+                tdi_str = 'nan' if np.isnan(current_tdi) else '{:.6f}'.format(current_tdi)
+                print('Task {:3d} SMI: {:.6f}, TDI: {}'.format(task, current_smi, tdi_str))
+            else:
+                current_smi, current_tdi = np.nan, np.nan
+
             # 记录结果（与FedAvg相同的格式）
-            results.append(np.array([round_idx, (round_idx // 10) % args.task_num, loss_avg, loss_test, acc_test, all_acc, best_acc]))
+            results.append(np.array([round_idx, task, loss_avg, loss_test, acc_test, all_acc, best_acc, current_smi, current_tdi]))
             final_results = np.array(results)
-            final_results = pd.DataFrame(final_results, columns=['epoch','task', 'loss_avg', 'loss_test', 'acc_test',  'all_acc','best_acc'])
+            final_results = pd.DataFrame(final_results, columns=['epoch','task', 'loss_avg', 'loss_test', 'acc_test',  'all_acc','best_acc', 'smi', 'tdi'])
             final_results.to_csv(results_save_path, index=False)
 
     print('Best model, iter: {}, acc: {}'.format(best_epoch, best_acc))

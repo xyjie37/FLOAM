@@ -1234,27 +1234,39 @@ import torch.nn.functional as F
 from torch.nn import LayerNorm
 
 class CDAPGenerator(nn.Module):
-    def __init__(self, feat_dim=512, prompt_dim=64, num_tasks=5):
+    def __init__(self, feat_dim=None, prompt_dim=64, num_tasks=5):
         super().__init__()
         self.prompt_dim = prompt_dim
-        self.ln = LayerNorm(feat_dim)
+        self.feat_dim = feat_dim
+        self.ln = None
+        self.mlp = None
+        self.ccda = nn.Linear(prompt_dim, prompt_dim)
+        self.affine_predictor = None
+
+        if self.feat_dim is not None:
+            self._build_backbone(self.feat_dim)
+
+    def _build_backbone(self, feat_dim):
+        self.feat_dim = feat_dim
+        self.ln = nn.LayerNorm(feat_dim)
         self.mlp = nn.Sequential(
             nn.Linear(feat_dim, feat_dim),
             nn.GELU(),
-            nn.Linear(feat_dim, prompt_dim)
+            nn.Linear(feat_dim, self.prompt_dim)
         )
-        
-        # 添加CCDA层
-        self.ccda = nn.Linear(prompt_dim, prompt_dim)
-        
-        # 添加LT层参数预测器
         self.affine_predictor = nn.Sequential(
-            nn.Linear(feat_dim, prompt_dim * 2),
+            nn.Linear(feat_dim, self.prompt_dim * 2),
             nn.GELU(),
-            nn.Linear(prompt_dim * 2, prompt_dim * 2)
+            nn.Linear(self.prompt_dim * 2, self.prompt_dim * 2)
         )
+
+    def ensure_initialized(self, feat_dim, device):
+        if self.ln is None or self.feat_dim != feat_dim:
+            self._build_backbone(feat_dim)
+            self.to(device)
         
     def forward(self, features, task_id):
+        self.ensure_initialized(features.size(-1), features.device)
         # 样本级提示
         x = self.ln(features)
         sample_prompts = self.mlp(x)  # [batch, prompt_dim]
@@ -1286,7 +1298,7 @@ class LocalUpdateRifFiL(object):
         self.prompt_dim = prompt_dim if prompt_dim is not None else args.prompt_dim
         print(f"[Client] Using prompt_dim={self.prompt_dim}")
         
-        self.cdap = CDAPGenerator(feat_dim=50, prompt_dim=self.prompt_dim)  # 使用统一维度，512 for CIFAR, 2048 for TinyImageNet
+        self.cdap = CDAPGenerator(prompt_dim=self.prompt_dim)  # 根据真实特征维度动态初始化
         self.current_global_prompts = None
         self.temperature = nn.Parameter(torch.tensor(0.9))
         self.prompt_cache = {}
@@ -1326,6 +1338,13 @@ class LocalUpdateRifFiL(object):
         self.update_temperature(self.current_task)
         net.train()
         self.cdap.train()
+
+        # 用真实特征维度初始化CDAP，避免LayerNorm维度硬编码错误
+        init_images, _ = next(iter(self.ldr_train))
+        init_images = init_images.to(self.args.device)
+        with torch.no_grad():
+            init_features = net.extract_features(init_images)
+        self.cdap.ensure_initialized(init_features.size(1), self.args.device)
 
         optimizer = torch.optim.SGD(
             list(net.parameters()) + list(self.cdap.parameters()),
