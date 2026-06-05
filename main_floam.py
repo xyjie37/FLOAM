@@ -13,6 +13,7 @@ from utils.train_utils import get_data, get_model
 from models.Update import LocalUpdateFedACD
 from models.test import test_img, test_img_local_all, compute_smi_tdi_for_task
 from create_anchor import create_anchor, agg_func, proto_aggregation
+from utils.runtime_utils import RoundTimer
 
 class FedACDServer:
     def __init__(self, args):
@@ -50,6 +51,9 @@ class FedACDServer:
         self.prev_client_centroids = None
         self.current_smi = np.nan
         self.current_tdi = np.nan
+        self.round_timer = RoundTimer(device=self.device) if self.args.benchmark_runtime else None
+        if self.args.benchmark_runtime and self.args.skip_eval is False:
+            self.args.skip_eval = True
 
     def _create_initial_anchor(self):
         """根据数据集创建初始锚点"""
@@ -73,7 +77,7 @@ class FedACDServer:
             return create_anchor(10, 300)
         elif self.args.dataset == 'agnews':
             return create_anchor(4, 100)
-        elif self.args.dataset == '20newsgroups':
+        elif self.args.dataset == '20newsgroup':
             return create_anchor(20, 300)
         return create_anchor(10, 32)  # 默认值
 
@@ -99,12 +103,17 @@ class FedACDServer:
             w_glob[k] = torch.div(w_glob[k], len(w_locals))
         return w_glob
 
-    def _update_global_anchor(self, local_protos):
-        """更新全局锚点"""
-        new_anchor = proto_aggregation(local_protos)
+    def _update_global_anchor(self, local_protos, local_counts=None):
+        """更新全局锚点（归一化 EMA，论文公式24）"""
+        new_anchor = proto_aggregation(
+            local_protos,
+            local_counts_list=local_counts,
+            mode=getattr(self.args, 'anchor_agg', 'client_balanced'),
+        )
         for i in range(self.args.num_classes):
             if i in new_anchor:
-                self.global_anchor[i] = 0.2 * new_anchor[i].to(self.device) + 0.8 * self.global_anchor[i]
+                updated = 0.2 * new_anchor[i].to(self.device) + 0.8 * self.global_anchor[i]
+                self.global_anchor[i] = updated / (updated.norm() + 1e-8)
 
     def _save_results(self):
         """保存训练结果"""
@@ -120,6 +129,9 @@ class FedACDServer:
             os.makedirs(save_folder)
         """执行联邦学习训练过程"""
         for epoch in range(self.args.epochs):
+            if self.round_timer is not None:
+                self.round_timer.begin_round(epoch)
+
             # 客户端采样
             m = max(int(self.args.frac * self.args.num_users), 1)
             idxs_users = np.random.choice(range(self.args.num_users), m, replace=False)
@@ -130,9 +142,12 @@ class FedACDServer:
             # 本地训练
             w_locals = []
             local_protos = {}
+            local_counts = {}
             loss_locals = []
           
             for idx in idxs_users:
+                if self.round_timer is not None:
+                    self.round_timer.start_client(idx)
                 local = LocalUpdateFedACD(
                     args=self.args,
                     anchor=self.global_anchor,
@@ -140,25 +155,42 @@ class FedACDServer:
                     idxs=idx,
                     task=task
                 )
-                w_local, loss, reps = local.train(
+                w_local, loss, reps, proto_counts = local.train(
                     net=copy.deepcopy(self.net_glob).to(self.device),
                     teacher_net=self.net_glob,
                     lr=self.args.lr
                 )
+                if self.round_timer is not None:
+                    self.round_timer.end_client(idx)
                 local_protos[idx] = agg_func(reps)
+                local_counts[idx] = proto_counts
                 w_locals.append(w_local)
                 loss_locals.append(loss)
 
+            if self.round_timer is not None:
+                self.round_timer.start_server()
+
             # 聚合更新
             w_glob = self._aggregate_weights(w_locals)
-            self._update_global_anchor(local_protos)
+            self._update_global_anchor(local_protos, local_counts)
           
             # 更新全局模型
             self.net_glob.load_state_dict(w_glob)
             for net_local in self.net_local_list:
                 net_local.load_state_dict(w_glob)
 
+            if self.round_timer is not None:
+                self.round_timer.end_server()
+                record = self.round_timer.finish_round()
+                print('Round {:3d} runtime: max_client={:.3f}s, server={:.3f}s, total={:.3f}s'.format(
+                    epoch, record['max_client_time'], record['server_time'], record['round_time']))
+
             # 评估和保存
+            if self.args.skip_eval:
+                gc.collect()
+                torch.cuda.empty_cache()
+                continue
+
             if (epoch + 1) % self.args.test_freq == 0:
                 acc_test, _, loss_test = test_img_local_all(
                     self.net_local_list, self.args, self.dataset_path, task
@@ -203,6 +235,12 @@ class FedACDServer:
 
             gc.collect()
             torch.cuda.empty_cache()
+
+        if self.round_timer is not None:
+            runtime_csv = self.args.runtime_csv or os.path.join(self.base_dir, 'runtime.csv')
+            self.round_timer.save_csv(runtime_csv)
+            self.round_timer.print_summary()
+            print('Runtime CSV saved to: {}'.format(runtime_csv))
 
         print(f'Best model at epoch {self.best_epoch}, accuracy {self.best_acc}')
 

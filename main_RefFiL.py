@@ -11,6 +11,7 @@ from utils.options import args_parser
 from utils.train_utils import get_data, get_model
 from models.Update import LocalUpdateRifFiL
 from models.test import test_img, test_img_local, test_img_local_all, compute_smi_tdi_for_task
+from utils.runtime_utils import RoundTimer
 import os
 
 class GlobalPromptManager:
@@ -143,7 +144,7 @@ class RefFiLServer:
             for k in client_updates[0]['model'].keys()
         }
 
-    def train_one_round(self, round_idx):
+    def train_one_round(self, round_idx, round_timer=None):
         # 与FedAvg相同的任务切换逻辑
         task = (round_idx // 10) % self.task_num
         print('Current task: ', task)
@@ -160,6 +161,8 @@ class RefFiLServer:
         print(f"[Round {round_idx}] Current task: {task}")
         
         for client_id in selected_clients:
+            if round_timer is not None:
+                round_timer.start_client(client_id)
             # 关键修改：传递提示维度
             trainer = LocalUpdateRifFiL(
                 args=self.args,
@@ -186,6 +189,8 @@ class RefFiLServer:
             
             # 训练客户端
             result = trainer.train(net=client_model, lr=self.args.lr)
+            if round_timer is not None:
+                round_timer.end_client(client_id)
             
             # 收集结果
             client_updates.append({
@@ -198,6 +203,9 @@ class RefFiLServer:
                 result["prompts"], 
                 trainer.current_labels
             )
+
+        if round_timer is not None:
+            round_timer.start_server()
 
         # 全局聚合（与FedAvg相同的逻辑）
         global_weights = self.aggregate_models(client_updates)
@@ -213,6 +221,9 @@ class RefFiLServer:
         
         # 提示聚类（RefFiL特有的逻辑）
         self.clustered_prompts = self.prompt_manager.aggregate_prompts(local_prompts_dict)
+
+        if round_timer is not None:
+            round_timer.end_server()
             
         # 设备验证
         print(f"[Round {round_idx}] Global model on: {next(self.global_model.parameters()).device}")
@@ -264,10 +275,21 @@ if __name__ == '__main__':
     prev_client_centroids = None
     current_smi = np.nan
     current_tdi = np.nan
+    round_timer = RoundTimer(device=args.device) if args.benchmark_runtime else None
+    if args.benchmark_runtime and args.skip_eval is False:
+        args.skip_eval = True
     
     for round_idx in range(args.epochs):
         print(f"\n===== Round {round_idx+1}/{args.epochs} =====")
-        global_prompts = server.train_one_round(round_idx)
+        if round_timer is not None:
+            round_timer.begin_round(round_idx)
+
+        global_prompts = server.train_one_round(round_idx, round_timer=round_timer)
+
+        if round_timer is not None:
+            record = round_timer.finish_round()
+            print('Round {:3d} runtime: max_client={:.3f}s, server={:.3f}s, total={:.3f}s'.format(
+                round_idx, record['max_client_time'], record['server_time'], record['round_time']))
         
         # 计算平均损失（与FedAvg相同的逻辑）
         # 注意：RefFiL版本没有返回loss_locals，这里简化处理
@@ -275,6 +297,9 @@ if __name__ == '__main__':
         loss_train.append(loss_avg)
 
         # 定期评估
+        if args.skip_eval:
+            continue
+
         if (round_idx + 1) % args.test_freq == 0:
             # 确保模型在设备上
             server.global_model.to(args.device)
@@ -324,6 +349,12 @@ if __name__ == '__main__':
             final_results = np.array(results)
             final_results = pd.DataFrame(final_results, columns=['epoch','task', 'loss_avg', 'loss_test', 'acc_test',  'all_acc','best_acc', 'smi', 'tdi'])
             final_results.to_csv(results_save_path, index=False)
+
+    if round_timer is not None:
+        runtime_csv = args.runtime_csv or os.path.join(base_dir, algo_dir, 'runtime.csv')
+        round_timer.save_csv(runtime_csv)
+        round_timer.print_summary()
+        print('Runtime CSV saved to: {}'.format(runtime_csv))
 
     print('Best model, iter: {}, acc: {}'.format(best_epoch, best_acc))
     print("===== Training Completed =====")

@@ -3,9 +3,9 @@
 set -euo pipefail
 
 # Usage:
-#   bash run_fedlwf_tinyimagenet.sh
-# Optional overrides:
-#   EPOCHS=100 LR=0.1 NUM_USERS=20 FRAC=0.5 LOCAL_EP=5 LOCAL_BS=50 WD=0.0 MODEL=resnet18 bash run_fedlwf_tinyimagenet.sh
+#   bash run_fedmtl_tinyimagenet.sh
+# FedMTL algorithm on tinyimagenet dataset
+# Runs with task_num=5 and task_num=10
 
 EPOCHS="${EPOCHS:-100}"
 LR="${LR:-0.1}"
@@ -14,26 +14,24 @@ FRAC="${FRAC:-0.5}"
 LOCAL_EP="${LOCAL_EP:-5}"
 LOCAL_BS="${LOCAL_BS:-50}"
 WD="${WD:-0.0}"
-MODEL="${MODEL:-tinyresnet18}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
-ALGO="fedlwf"
 DATASET="tinyimagenet"
+MODEL="tinyresnet18"
 NUM_CLASSES=200
-TASKS=(5 10)
-SEEDS=(0 1 2)
+TASK_NUMS=(5 10)
 
 run_one() {
   local task_num="$1"
-  local seed="$2"
-  local entry="main_${ALGO}.py"
+
+  local entry="main_fedmtl.py"
   local dataset_path="./dataset/${DATASET}-dir-0.1-task-${task_num}"
-  local result_name="${ALGO}_${DATASET}_task${task_num}_seed${seed}"
+  local result_name="fedmtl_${DATASET}_t${task_num}"
 
   echo "=================================================="
-  echo "Running: ${ALGO} on ${DATASET} | task=${task_num} | seed=${seed}"
+  echo "Running: FedMTL on ${DATASET} (task_num=${task_num})"
   echo "Entry: ${entry}"
-  echo "Dataset path: ${dataset_path}"
+  echo "Model: ${MODEL}"
   echo "Result tag: ${result_name}"
   echo "=================================================="
 
@@ -50,14 +48,11 @@ run_one() {
     --results_save "${result_name}" \
     --wd "${WD}" \
     --datasetpath "${dataset_path}" \
-    --task_num "${task_num}" \
-    --seed "${seed}"
+    --task_num "${task_num}"
 }
 
-for task in "${TASKS[@]}"; do
-  for seed in "${SEEDS[@]}"; do
-    run_one "${task}" "${seed}"
-  done
+for task_num in "${TASK_NUMS[@]}"; do
+  run_one "${task_num}"
 done
 
 echo "All runs finished."

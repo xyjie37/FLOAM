@@ -1,0 +1,400 @@
+/home/jxy/FLOAM_ALL/models/Update.py:388: UserWarning: The use of `x.T` on tensors of dimension other than 2 to reverse their shape is deprecated and it will throw an error in a future release. Consider `x.mT` to transpose batches of matrices or `x.permute(*torch.arange(x.ndim - 1, -1, -1))` to reverse the dimensions of a tensor. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4480.)
+  weighted = (feat.T @ weights).T
+current task: 0
+Round   0, Average loss 4.072, Test loss 2.345, Test accuracy: 8.19
+All Test Data: Average loss: 2.3481, Accuracy: 9.50% 
+current task: 0
+Round   1, Average loss 3.853, Test loss 2.503, Test accuracy: 8.19
+All Test Data: Average loss: 2.4511, Accuracy: 9.50% 
+current task: 0
+Round   2, Average loss 3.706, Test loss 2.410, Test accuracy: 8.92
+All Test Data: Average loss: 2.3264, Accuracy: 10.15% 
+current task: 0
+Round   3, Average loss 3.515, Test loss 2.206, Test accuracy: 19.32
+All Test Data: Average loss: 2.1152, Accuracy: 21.15% 
+current task: 0
+Round   4, Average loss 3.250, Test loss 1.835, Test accuracy: 34.72
+All Test Data: Average loss: 1.8100, Accuracy: 33.89% 
+current task: 0
+Round   5, Average loss 3.228, Test loss 2.140, Test accuracy: 20.99
+All Test Data: Average loss: 2.0446, Accuracy: 23.23% 
+current task: 0
+Round   6, Average loss 3.019, Test loss 1.785, Test accuracy: 36.64
+All Test Data: Average loss: 1.7476, Accuracy: 37.88% 
+current task: 0
+Round   7, Average loss 2.970, Test loss 1.765, Test accuracy: 34.40
+All Test Data: Average loss: 1.7211, Accuracy: 36.96% 
+current task: 0
+Round   8, Average loss 2.804, Test loss 1.668, Test accuracy: 36.95
+All Test Data: Average loss: 1.6301, Accuracy: 40.41% 
+current task: 0
+Round   9, Average loss 2.749, Test loss 2.028, Test accuracy: 24.50
+All Test Data: Average loss: 1.9493, Accuracy: 29.27% 
+Task   0 SMI: 0.061757, TDI: nan
+current task: 1
+Round  10, Average loss 2.820, Test loss 1.537, Test accuracy: 42.94
+All Test Data: Average loss: 1.5288, Accuracy: 44.93% 
+current task: 1
+Round  11, Average loss 2.647, Test loss 1.455, Test accuracy: 47.36
+All Test Data: Average loss: 1.4907, Accuracy: 46.33% 
+current task: 1
+Round  12, Average loss 2.741, Test loss 1.650, Test accuracy: 39.69
+All Test Data: Average loss: 1.6987, Accuracy: 39.83% 
+current task: 1
+Round  13, Average loss 2.563, Test loss 1.445, Test accuracy: 45.62
+All Test Data: Average loss: 1.4623, Accuracy: 47.00% 
+current task: 1
+Round  14, Average loss 2.568, Test loss 1.424, Test accuracy: 49.32
+All Test Data: Average loss: 1.4566, Accuracy: 48.30% 
+current task: 1
+Traceback (most recent call last):
+  File "/home/jxy/FLOAM_ALL/main_floam.py", line 213, in <module>
+    server.train()
+  File "/home/jxy/FLOAM_ALL/main_floam.py", line 144, in train
+    w_local, loss, reps = local.train(
+  File "/home/jxy/FLOAM_ALL/models/Update.py", line 346, in train
+    self._grad_norm(lambda logits, _, t: AnchorDistillationLoss(
+  File "/home/jxy/FLOAM_ALL/models/Update.py", line 285, in _grad_norm
+    features = self.real_net.extract_features(inputs)
+  File "/home/jxy/FLOAM_ALL/models/ResNet.py", line 120, in extract_features
+    out = self.layer2(out)
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/modules/container.py", line 253, in forward
+    input = module(input)
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/jxy/FLOAM_ALL/models/ResNet.py", line 35, in forward
+    out += self.shortcut(x)
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/modules/container.py", line 253, in forward
+    input = module(input)
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/modules/batchnorm.py", line 194, in forward
+    return F.batch_norm(
+  File "/home/jxy/miniconda3/envs/waihai/lib/python3.10/site-packages/torch/nn/functional.py", line 2846, in batch_norm
+    return torch.batch_norm(
+KeyboardInterrupt
+/home/jxy/FLOAM_ALL/models/Update.py:388: UserWarning: The use of `x.T` on tensors of dimension other than 2 to reverse their shape is deprecated and it will throw an error in a future release. Consider `x.mT` to transpose batches of matrices or `x.permute(*torch.arange(x.ndim - 1, -1, -1))` to reverse the dimensions of a tensor. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4480.)
+  weighted = (feat.T @ weights).T
+current task: 0
+Round   0, Average loss 3.969, Test loss 2.368, Test accuracy: 8.70
+All Test Data: Average loss: 2.3414, Accuracy: 10.44% 
+current task: 0
+Round   1, Average loss 3.877, Test loss 2.388, Test accuracy: 7.91
+All Test Data: Average loss: 2.3433, Accuracy: 10.09% 
+current task: 0
+Round   2, Average loss 3.663, Test loss 2.308, Test accuracy: 9.22
+All Test Data: Average loss: 2.2542, Accuracy: 11.14% 
+current task: 0
+Round   3, Average loss 3.535, Test loss 1.981, Test accuracy: 23.10
+All Test Data: Average loss: 1.9394, Accuracy: 26.07% 
+current task: 0
+Round   4, Average loss 3.220, Test loss 1.756, Test accuracy: 35.77
+All Test Data: Average loss: 1.7493, Accuracy: 36.79% 
+current task: 0
+Round   5, Average loss 3.113, Test loss 1.723, Test accuracy: 36.09
+All Test Data: Average loss: 1.7107, Accuracy: 37.32% 
+current task: 0
+Round   6, Average loss 3.019, Test loss 1.620, Test accuracy: 38.61
+All Test Data: Average loss: 1.6151, Accuracy: 40.04% 
+current task: 0
+Round   7, Average loss 2.809, Test loss 1.589, Test accuracy: 38.53
+All Test Data: Average loss: 1.5487, Accuracy: 42.10% 
+current task: 0
+Round   8, Average loss 2.838, Test loss 1.599, Test accuracy: 42.79
+All Test Data: Average loss: 1.6134, Accuracy: 41.44% 
+current task: 0
+Round   9, Average loss 2.816, Test loss 1.769, Test accuracy: 35.73
+All Test Data: Average loss: 1.7014, Accuracy: 37.86% 
+Task   0 SMI: 0.069505, TDI: nan
+current task: 1
+Round  10, Average loss 2.908, Test loss 1.663, Test accuracy: 38.93
+All Test Data: Average loss: 1.6732, Accuracy: 39.17% 
+current task: 1
+Round  11, Average loss 2.703, Test loss 1.509, Test accuracy: 44.76
+All Test Data: Average loss: 1.5390, Accuracy: 43.94% 
+current task: 1
+Round  12, Average loss 2.622, Test loss 1.486, Test accuracy: 46.31
+All Test Data: Average loss: 1.5194, Accuracy: 44.81% 
+current task: 1
+Round  13, Average loss 2.662, Test loss 1.583, Test accuracy: 43.32
+All Test Data: Average loss: 1.6194, Accuracy: 41.36% 
+current task: 1
+Round  14, Average loss 2.694, Test loss 1.562, Test accuracy: 44.26
+All Test Data: Average loss: 1.6156, Accuracy: 42.17% 
+current task: 1
+Round  15, Average loss 2.665, Test loss 1.481, Test accuracy: 46.26
+All Test Data: Average loss: 1.5339, Accuracy: 44.71% 
+current task: 1
+Round  16, Average loss 2.494, Test loss 1.347, Test accuracy: 52.08
+All Test Data: Average loss: 1.4261, Accuracy: 49.27% 
+current task: 1
+Round  17, Average loss 2.671, Test loss 1.564, Test accuracy: 43.37
+All Test Data: Average loss: 1.6053, Accuracy: 42.15% 
+current task: 1
+Round  18, Average loss 2.636, Test loss 1.439, Test accuracy: 47.21
+All Test Data: Average loss: 1.4966, Accuracy: 45.83% 
+current task: 1
+Round  19, Average loss 2.568, Test loss 1.381, Test accuracy: 51.02
+All Test Data: Average loss: 1.4148, Accuracy: 49.37% 
+Task   1 SMI: 0.058155, TDI: 0.092322
+current task: 2
+Round  20, Average loss 2.789, Test loss 1.340, Test accuracy: 52.98
+All Test Data: Average loss: 1.3452, Accuracy: 51.69% 
+current task: 2
+Round  21, Average loss 2.770, Test loss 1.335, Test accuracy: 51.96
+All Test Data: Average loss: 1.3455, Accuracy: 51.85% 
+current task: 2
+Round  22, Average loss 2.693, Test loss 1.226, Test accuracy: 57.73
+All Test Data: Average loss: 1.2397, Accuracy: 56.07% 
+current task: 2
+Round  23, Average loss 2.655, Test loss 1.272, Test accuracy: 54.06
+All Test Data: Average loss: 1.3103, Accuracy: 53.24% 
+current task: 2
+Round  24, Average loss 2.632, Test loss 1.275, Test accuracy: 53.90
+All Test Data: Average loss: 1.3071, Accuracy: 53.49% 
+current task: 2
+Round  25, Average loss 2.586, Test loss 1.271, Test accuracy: 54.87
+All Test Data: Average loss: 1.2869, Accuracy: 54.40% 
+current task: 2
+Round  26, Average loss 2.575, Test loss 1.278, Test accuracy: 54.97
+All Test Data: Average loss: 1.2871, Accuracy: 54.30% 
+current task: 2
+Round  27, Average loss 2.635, Test loss 1.250, Test accuracy: 55.03
+All Test Data: Average loss: 1.2702, Accuracy: 54.93% 
+current task: 2
+Round  28, Average loss 2.612, Test loss 1.248, Test accuracy: 56.80
+All Test Data: Average loss: 1.2611, Accuracy: 54.96% 
+current task: 2
+Round  29, Average loss 2.664, Test loss 1.315, Test accuracy: 52.03
+All Test Data: Average loss: 1.3502, Accuracy: 50.78% 
+Task   2 SMI: 0.046783, TDI: 0.078373
+current task: 3
+Round  30, Average loss 2.816, Test loss 1.185, Test accuracy: 57.71
+All Test Data: Average loss: 1.2312, Accuracy: 55.89% 
+current task: 3
+Round  31, Average loss 2.706, Test loss 1.137, Test accuracy: 60.17
+All Test Data: Average loss: 1.2021, Accuracy: 56.79% 
+current task: 3
+Round  32, Average loss 2.697, Test loss 1.119, Test accuracy: 62.19
+All Test Data: Average loss: 1.1508, Accuracy: 59.95% 
+current task: 3
+Round  33, Average loss 2.607, Test loss 1.126, Test accuracy: 61.44
+All Test Data: Average loss: 1.1896, Accuracy: 58.43% 
+current task: 3
+Round  34, Average loss 2.643, Test loss 1.171, Test accuracy: 59.54
+All Test Data: Average loss: 1.2251, Accuracy: 57.33% 
+current task: 3
+Round  35, Average loss 2.608, Test loss 1.224, Test accuracy: 57.73
+All Test Data: Average loss: 1.2740, Accuracy: 55.60% 
+current task: 3
+Round  36, Average loss 2.623, Test loss 1.179, Test accuracy: 59.90
+All Test Data: Average loss: 1.2389, Accuracy: 56.87% 
+current task: 3
+Round  37, Average loss 2.618, Test loss 1.200, Test accuracy: 57.71
+All Test Data: Average loss: 1.2191, Accuracy: 56.53% 
+current task: 3
+Round  38, Average loss 2.613, Test loss 1.174, Test accuracy: 59.78
+All Test Data: Average loss: 1.2375, Accuracy: 56.84% 
+current task: 3
+Round  39, Average loss 2.552, Test loss 1.157, Test accuracy: 60.40
+All Test Data: Average loss: 1.2070, Accuracy: 58.19% 
+Task   3 SMI: 0.058551, TDI: 0.094367
+current task: 4
+Round  40, Average loss 2.831, Test loss 1.178, Test accuracy: 56.00
+All Test Data: Average loss: 1.2490, Accuracy: 55.12% 
+current task: 4
+Round  41, Average loss 2.737, Test loss 1.103, Test accuracy: 59.44
+All Test Data: Average loss: 1.1865, Accuracy: 58.09% 
+current task: 4
+Round  42, Average loss 2.633, Test loss 1.120, Test accuracy: 58.16
+All Test Data: Average loss: 1.1950, Accuracy: 57.61% 
+current task: 4
+Round  43, Average loss 2.642, Test loss 1.133, Test accuracy: 59.69
+All Test Data: Average loss: 1.2013, Accuracy: 57.30% 
+current task: 4
+Round  44, Average loss 2.679, Test loss 1.110, Test accuracy: 59.76
+All Test Data: Average loss: 1.1526, Accuracy: 59.22% 
+current task: 4
+Round  45, Average loss 2.614, Test loss 1.083, Test accuracy: 61.78
+All Test Data: Average loss: 1.1346, Accuracy: 59.63% 
+current task: 4
+Round  46, Average loss 2.656, Test loss 1.103, Test accuracy: 59.97
+All Test Data: Average loss: 1.1403, Accuracy: 59.93% 
+current task: 4
+Round  47, Average loss 2.650, Test loss 1.091, Test accuracy: 61.53
+All Test Data: Average loss: 1.1369, Accuracy: 60.54% 
+current task: 4
+Round  48, Average loss 2.561, Test loss 1.058, Test accuracy: 63.02
+All Test Data: Average loss: 1.0989, Accuracy: 61.77% 
+current task: 4
+Round  49, Average loss 2.601, Test loss 1.119, Test accuracy: 59.65
+All Test Data: Average loss: 1.1523, Accuracy: 59.55% 
+Task   4 SMI: 0.082680, TDI: 0.085512
+current task: 5
+Round  50, Average loss 2.796, Test loss 1.199, Test accuracy: 57.39
+All Test Data: Average loss: 1.1727, Accuracy: 57.93% 
+current task: 5
+Round  51, Average loss 2.658, Test loss 1.103, Test accuracy: 59.34
+All Test Data: Average loss: 1.0763, Accuracy: 61.20% 
+current task: 5
+Round  52, Average loss 2.652, Test loss 1.046, Test accuracy: 63.65
+All Test Data: Average loss: 1.0258, Accuracy: 63.47% 
+current task: 5
+Round  53, Average loss 2.579, Test loss 1.049, Test accuracy: 64.22
+All Test Data: Average loss: 1.0243, Accuracy: 64.00% 
+current task: 5
+Round  54, Average loss 2.640, Test loss 1.030, Test accuracy: 61.01
+All Test Data: Average loss: 1.0464, Accuracy: 63.04% 
+current task: 5
+Round  55, Average loss 2.587, Test loss 1.061, Test accuracy: 62.52
+All Test Data: Average loss: 1.0771, Accuracy: 62.56% 
+current task: 5
+Round  56, Average loss 2.582, Test loss 1.054, Test accuracy: 63.07
+All Test Data: Average loss: 1.0727, Accuracy: 62.97% 
+current task: 5
+Round  57, Average loss 2.552, Test loss 1.088, Test accuracy: 61.19
+All Test Data: Average loss: 1.1119, Accuracy: 61.07% 
+current task: 5
+Round  58, Average loss 2.574, Test loss 1.122, Test accuracy: 61.84
+All Test Data: Average loss: 1.1332, Accuracy: 60.45% 
+current task: 5
+Round  59, Average loss 2.505, Test loss 1.141, Test accuracy: 59.43
+All Test Data: Average loss: 1.1055, Accuracy: 62.20% 
+Task   5 SMI: 0.091954, TDI: 0.078298
+current task: 6
+Round  60, Average loss 2.767, Test loss 1.023, Test accuracy: 64.61
+All Test Data: Average loss: 1.0402, Accuracy: 63.18% 
+current task: 6
+Round  61, Average loss 2.692, Test loss 0.970, Test accuracy: 65.10
+All Test Data: Average loss: 0.9900, Accuracy: 65.06% 
+current task: 6
+Round  62, Average loss 2.654, Test loss 0.956, Test accuracy: 65.94
+All Test Data: Average loss: 0.9916, Accuracy: 65.11% 
+current task: 6
+Round  63, Average loss 2.700, Test loss 0.960, Test accuracy: 66.25
+All Test Data: Average loss: 1.0193, Accuracy: 64.32% 
+current task: 6
+Round  64, Average loss 2.708, Test loss 1.034, Test accuracy: 63.92
+All Test Data: Average loss: 1.0501, Accuracy: 63.59% 
+current task: 6
+Round  65, Average loss 2.593, Test loss 0.990, Test accuracy: 65.71
+All Test Data: Average loss: 1.0225, Accuracy: 64.22% 
+current task: 6
+Round  66, Average loss 2.581, Test loss 1.006, Test accuracy: 65.74
+All Test Data: Average loss: 1.0236, Accuracy: 64.88% 
+current task: 6
+Round  67, Average loss 2.541, Test loss 0.994, Test accuracy: 65.67
+All Test Data: Average loss: 1.0621, Accuracy: 64.07% 
+current task: 6
+Round  68, Average loss 2.628, Test loss 1.083, Test accuracy: 63.22
+All Test Data: Average loss: 1.0991, Accuracy: 63.02% 
+current task: 6
+Round  69, Average loss 2.579, Test loss 1.086, Test accuracy: 63.04
+All Test Data: Average loss: 1.1273, Accuracy: 61.52% 
+Task   6 SMI: 0.077278, TDI: 0.085067
+current task: 7
+Round  70, Average loss 2.771, Test loss 0.930, Test accuracy: 67.42
+All Test Data: Average loss: 1.0047, Accuracy: 64.51% 
+current task: 7
+Round  71, Average loss 2.654, Test loss 0.915, Test accuracy: 68.43
+All Test Data: Average loss: 1.0102, Accuracy: 64.89% 
+current task: 7
+Round  72, Average loss 2.615, Test loss 0.897, Test accuracy: 70.04
+All Test Data: Average loss: 0.9986, Accuracy: 65.18% 
+current task: 7
+Round  73, Average loss 2.636, Test loss 0.896, Test accuracy: 69.05
+All Test Data: Average loss: 1.0019, Accuracy: 64.88% 
+current task: 7
+Round  74, Average loss 2.575, Test loss 0.873, Test accuracy: 70.61
+All Test Data: Average loss: 0.9368, Accuracy: 67.41% 
+current task: 7
+Round  75, Average loss 2.632, Test loss 0.970, Test accuracy: 66.48
+All Test Data: Average loss: 1.0349, Accuracy: 64.19% 
+current task: 7
+Round  76, Average loss 2.595, Test loss 0.914, Test accuracy: 70.74
+All Test Data: Average loss: 1.0333, Accuracy: 65.42% 
+current task: 7
+Round  77, Average loss 2.527, Test loss 0.914, Test accuracy: 69.91
+All Test Data: Average loss: 1.0071, Accuracy: 66.19% 
+current task: 7
+Round  78, Average loss 2.529, Test loss 0.895, Test accuracy: 69.46
+All Test Data: Average loss: 0.9779, Accuracy: 66.79% 
+current task: 7
+Round  79, Average loss 2.536, Test loss 0.967, Test accuracy: 68.39
+All Test Data: Average loss: 1.0459, Accuracy: 65.72% 
+Task   7 SMI: 0.050385, TDI: 0.056047
+current task: 8
+Round  80, Average loss 2.752, Test loss 0.970, Test accuracy: 66.79
+All Test Data: Average loss: 1.0177, Accuracy: 64.45% 
+current task: 8
+Round  81, Average loss 2.676, Test loss 0.976, Test accuracy: 66.82
+All Test Data: Average loss: 1.0225, Accuracy: 64.95% 
+current task: 8
+Round  82, Average loss 2.687, Test loss 0.975, Test accuracy: 67.92
+All Test Data: Average loss: 1.0499, Accuracy: 64.16% 
+current task: 8
+Round  83, Average loss 2.663, Test loss 0.966, Test accuracy: 67.86
+All Test Data: Average loss: 1.0220, Accuracy: 65.14% 
+current task: 8
+Round  84, Average loss 2.594, Test loss 0.937, Test accuracy: 68.89
+All Test Data: Average loss: 0.9983, Accuracy: 66.09% 
+current task: 8
+Round  85, Average loss 2.627, Test loss 0.994, Test accuracy: 66.72
+All Test Data: Average loss: 1.0752, Accuracy: 63.75% 
+current task: 8
+Round  86, Average loss 2.638, Test loss 0.965, Test accuracy: 67.47
+All Test Data: Average loss: 1.0183, Accuracy: 65.43% 
+current task: 8
+Round  87, Average loss 2.600, Test loss 1.077, Test accuracy: 65.38
+All Test Data: Average loss: 1.1830, Accuracy: 61.09% 
+current task: 8
+Round  88, Average loss 2.580, Test loss 0.972, Test accuracy: 68.45
+All Test Data: Average loss: 1.0630, Accuracy: 65.15% 
+current task: 8
+Round  89, Average loss 2.647, Test loss 1.059, Test accuracy: 63.59
+All Test Data: Average loss: 1.1369, Accuracy: 62.51% 
+Task   8 SMI: 0.057855, TDI: 0.061572
+current task: 9
+Round  90, Average loss 2.746, Test loss 0.961, Test accuracy: 66.82
+All Test Data: Average loss: 0.9269, Accuracy: 67.52% 
+current task: 9
+Round  91, Average loss 2.634, Test loss 0.943, Test accuracy: 66.46
+All Test Data: Average loss: 0.8904, Accuracy: 68.63% 
+current task: 9
+Round  92, Average loss 2.621, Test loss 0.943, Test accuracy: 67.27
+All Test Data: Average loss: 0.9091, Accuracy: 68.18% 
+current task: 9
+Round  93, Average loss 2.629, Test loss 0.954, Test accuracy: 65.85
+All Test Data: Average loss: 0.9030, Accuracy: 68.00% 
+current task: 9
+Round  94, Average loss 2.520, Test loss 0.970, Test accuracy: 65.63
+All Test Data: Average loss: 0.8928, Accuracy: 69.28% 
+current task: 9
+Round  95, Average loss 2.510, Test loss 0.998, Test accuracy: 66.94
+All Test Data: Average loss: 0.9642, Accuracy: 66.95% 
+current task: 9
+Round  96, Average loss 2.510, Test loss 1.009, Test accuracy: 65.25
+All Test Data: Average loss: 0.9515, Accuracy: 67.36% 
+current task: 9
+Round  97, Average loss 2.491, Test loss 1.014, Test accuracy: 66.32
+All Test Data: Average loss: 0.9817, Accuracy: 67.20% 
+current task: 9
+Round  98, Average loss 2.551, Test loss 1.043, Test accuracy: 63.94
+All Test Data: Average loss: 0.9493, Accuracy: 67.73% 
+current task: 9
+Round  99, Average loss 2.498, Test loss 1.123, Test accuracy: 65.63
+All Test Data: Average loss: 1.1323, Accuracy: 62.34% 
+Task   9 SMI: 0.050018, TDI: 0.083998
+Best model at epoch 94, accuracy 69.28488660817746

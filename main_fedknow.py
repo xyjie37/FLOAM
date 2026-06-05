@@ -13,6 +13,7 @@ from utils.options import args_parser
 from utils.train_utils import get_data, get_model
 from models.Update import LocalUpdateFedKnow
 from models.test import test_img, test_img_local, test_img_local_all, compute_smi_tdi_for_task
+from utils.runtime_utils import RoundTimer
 import os
 
 import pdb
@@ -70,8 +71,14 @@ if __name__ == '__main__':
     prev_client_centroids = None
     current_smi = np.nan
     current_tdi = np.nan
+    round_timer = RoundTimer(device=args.device) if args.benchmark_runtime else None
+    if args.benchmark_runtime and args.skip_eval is False:
+        args.skip_eval = True
     
     for iter in range(args.epochs):
+        if round_timer is not None:
+            round_timer.begin_round(iter)
+
         w_glob = None
         loss_locals = []
         
@@ -84,10 +91,14 @@ if __name__ == '__main__':
         print('Current task: ', task)
         # Local Updates
         for idx in idxs_users:
+            if round_timer is not None:
+                round_timer.start_client(idx)
             #数据集名字，序号
             local = LocalUpdateFedKnow(args=args, dataset=dataset_path, idxs=idx, task = task)
             net_local = copy.deepcopy(net_local_list[idx])
             w_local, loss = local.train(net=net_local.to(args.device), lr=lr)
+            if round_timer is not None:
+                round_timer.end_client(idx)
                 
             loss_locals.append(copy.deepcopy(loss))
 
@@ -97,6 +108,9 @@ if __name__ == '__main__':
                 for k in w_glob.keys():
                     w_glob[k] += w_local[k]
         
+        if round_timer is not None:
+            round_timer.start_server()
+
         # Aggregation
         for k in w_glob.keys():
             w_glob[k] = torch.div(w_glob[k], m)
@@ -107,6 +121,12 @@ if __name__ == '__main__':
         for user_idx in range(args.num_users):
             net_local_list[user_idx].load_state_dict(w_glob, strict=False)
         net_glob.load_state_dict(w_glob, strict=False)
+
+        if round_timer is not None:
+            round_timer.end_server()
+            record = round_timer.finish_round()
+            print('Round {:3d} runtime: max_client={:.3f}s, server={:.3f}s, total={:.3f}s'.format(
+                iter, record['max_client_time'], record['server_time'], record['round_time']))
         # if (iter + 1) == 50:
         #     lr = 0.01
         # elif (iter + 1) ==75:
@@ -115,6 +135,9 @@ if __name__ == '__main__':
         # print loss
         loss_avg = sum(loss_locals) / len(loss_locals)
         loss_train.append(loss_avg)
+
+        if args.skip_eval:
+            continue
 
         if (iter + 1) % args.test_freq == 0:
             acc_test, acc_test_var, loss_test = test_img_local_all(net_local_list, args, dataset_test=dataset_path, task=task, return_all=False)
@@ -159,5 +182,11 @@ if __name__ == '__main__':
             final_results = np.array(results)
             final_results = pd.DataFrame(final_results, columns=['epoch','task', 'loss_avg', 'loss_test', 'acc_test',  'all_acc','best_acc', 'smi', 'tdi'])
             final_results.to_csv(results_save_path, index=False)
+
+    if round_timer is not None:
+        runtime_csv = args.runtime_csv or os.path.join(base_dir, algo_dir, 'runtime.csv')
+        round_timer.save_csv(runtime_csv)
+        round_timer.print_summary()
+        print('Runtime CSV saved to: {}'.format(runtime_csv))
 
     print('Best model, iter: {}, acc: {}'.format(best_epoch, best_acc))

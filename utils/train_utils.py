@@ -7,6 +7,7 @@ from models.resnet_imagenet import ResNet18_ImageNet
 from utils.sampling import iid, noniid, iid_unbalanced, noniid_unbalanced
 from models.speechresnet import SpeechResNet18
 from models.TextCNNFedTA import TextCNNFedTA
+from models.TextCNN import TextCNN
 from models.GenericFedTA import GenericFedTA
 
 

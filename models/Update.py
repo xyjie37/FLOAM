@@ -176,15 +176,15 @@ class AnchorContrastiveLoss(nn.Module):
         # ------- sparsemax 近似（可导、连续） -------
         eps = 1e-12
         if self.use_sparsemax:
-            # 使用 sparsemax 替代 soft top-k
+            # sparsemax 用于选择 hard-negative support，不作为概率权重参与 score 计算
             w = self.sparsemax(neg_logits, dim=1)  # [B,K]
-            
-            # 确保权重和为1，避免数值问题
-            w_sum = w.sum(dim=1, keepdim=True)
-            w = w / (w_sum + eps)
-            
-            # 计算稀疏加权的负样本logits
-            lse_neg_sparsemax = torch.logsumexp(neg_logits + torch.log(w + eps), 
+
+            # support：sparsemax 权重大于 0 的负类位置
+            support_mask = (w > 0)  # [B, K]
+
+            # 在 support 上直接做 log-sum-exp，保留 hard-negative 的真实聚合强度
+            neg_logits_sparse = neg_logits.masked_fill(~support_mask, -float('inf'))
+            lse_neg_sparsemax = torch.logsumexp(neg_logits_sparse,
                                                dim=1, keepdim=True)  # [B,1]
 
             log_sum_hard = torch.logsumexp(
@@ -202,12 +202,14 @@ class AnchorContrastiveLoss(nn.Module):
         if self.training and adaptive_k:
             with torch.no_grad():
                 if self.use_sparsemax:
-                    sim_neg = sim.masked_fill(pos_mask, -1e9)
                     w_sim = self.sparsemax(neg_logits, dim=1)
-                    # 确保权重和为1
-                    w_sim = w_sim / (w_sim.sum(dim=1, keepdim=True) + eps)
-                    hard_stat = (w_sim * neg_logits.clamp(min=-30, max=30)
-                                 ).sum(dim=1).mean()
+                    # 在 sparsemax 选出的 support 上均匀平均，衡量 hard-negative 平均强度
+                    support_mask_sim = (w_sim > 0)  # [B, K]
+                    support_size = support_mask_sim.sum(dim=1).clamp(min=1).float()  # [B]
+                    neg_logits_clamped = neg_logits.clamp(min=-30, max=30)
+                    hard_stat = (
+                        (neg_logits_clamped * support_mask_sim.float()).sum(dim=1) / support_size
+                    ).mean()
                 else:
                     hard_neg, _ = torch.topk(neg_logits, k=dynamic_k, dim=1)
                     hard_stat = hard_neg.mean()
@@ -225,11 +227,12 @@ class AnchorContrastiveLoss(nn.Module):
             if self.use_sparsemax:
                 sim_neg = sim.masked_fill(pos_mask, -1e9)
                 w_sim = self.sparsemax(neg_logits, dim=1)
-                # 确保权重和为1
-                w_sim = w_sim / (w_sim.sum(dim=1, keepdim=True) + eps)
+                # 在 support 上均匀平均，与 hard-negative support 定义一致
+                support_mask_m = (w_sim > 0)
+                support_size_m = support_mask_m.sum(dim=1).clamp(min=1).float()
                 self.metrics['hard_neg_sim'] = float(
-                    (w_sim * sim_neg.clamp(min=-1, max=1)
-                     ).sum(dim=1).mean().item())
+                    ((sim_neg.clamp(min=-1, max=1) * support_mask_m.float()).sum(dim=1) / support_size_m
+                     ).mean().item())
             else:
                 hard_neg_sim, _ = torch.topk(
                     sim.masked_fill(pos_mask, -1e9), k=dynamic_k, dim=1)
@@ -289,6 +292,51 @@ class LocalUpdateFedACD(object):         #完整版客户端
         norms = [g.norm() for g in grads if g is not None]
         return torch.stack(norms).mean() if norms else torch.tensor(0.0, device=self.args.device)
 
+    def _get_classifier_layer(self, net):
+        if hasattr(net, 'linear'):
+            return net.linear
+        if hasattr(net, 'fc'):
+            return net.fc
+        raise AttributeError('Model must expose linear or fc classifier head')
+
+    def _get_classifier_weights(self, net):
+        weights = self._get_classifier_layer(net).weight.detach()
+        return F.normalize(weights, p=2, dim=1)
+
+    @torch.no_grad()
+    def _compute_local_logit_means(self, net):
+        """Per-client class mean in logit space (same space as baseline contrastive)."""
+        num_classes = self.num_classes
+        class_sums = torch.zeros(num_classes, num_classes, device=self.args.device)
+        class_counts = torch.zeros(num_classes, device=self.args.device)
+        for images, labels in self.ldr_train:
+            images, labels = images.to(self.args.device), labels.to(self.args.device)
+            features = net.extract_features(images)
+            logits = net.only_liner(features)
+            for label in labels.unique():
+                mask = labels == label
+                lbl = label.item()
+                class_sums[lbl] += logits[mask].sum(dim=0)
+                class_counts[lbl] += mask.sum().item()
+
+        contrast_anchors = torch.eye(num_classes, device=self.args.device)
+        classifier_rows = self._get_classifier_weights(net)
+        if classifier_rows.size(1) == num_classes:
+            contrast_anchors = classifier_rows.clone()
+        for lbl in range(num_classes):
+            if class_counts[lbl] > 0:
+                mean_vec = class_sums[lbl] / class_counts[lbl]
+                contrast_anchors[lbl] = mean_vec / (mean_vec.norm() + 1e-8)
+        return contrast_anchors
+
+    def _get_contrast_anchors(self, net):
+        mode = getattr(self.args, 'contrast_target', 'shared')
+        if mode == 'shared':
+            return self.anchor
+        if mode == 'classifier':
+            return self._get_classifier_weights(net)
+        return self._compute_local_logit_means(net)
+
     # ---------- 训练 ----------
     def train(self, net, teacher_net, lr, idx=-1, local_eps=None):
         net.train()
@@ -311,7 +359,10 @@ class LocalUpdateFedACD(object):         #完整版客户端
         while len(self.loss_weights_queue) < self.delay_steps:
             self._enqueue_weights(torch.ones(3, device=self.args.device))
 
+        ot_cost = getattr(self.args, 'ot_cost', 'anchor_geometry')
+
         for epoch in range(local_eps):
+            contrast_anchors = self._get_contrast_anchors(self.real_net)
             batch_loss = []
             for images, labels in self.ldr_train:
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
@@ -323,25 +374,25 @@ class LocalUpdateFedACD(object):         #完整版客户端
                 loss_ce = self.loss_func(logits, labels)
 
                 contrast_loss = AnchorContrastiveLoss(
-                    anchors=self.anchor, temperature=0.5, device=self.args.device
+                    anchors=contrast_anchors, temperature=0.5, device=self.args.device
                 )(features=logits, labels=labels)
 
                 with torch.no_grad():
                     t_net = teacher_net.module if hasattr(teacher_net, 'module') else teacher_net
                     teacher_out = t_net(images)
                 distillation_loss = AnchorDistillationLoss(
-                    logits, teacher_out, self.anchor, temperature=1.0)()
+                    logits, teacher_out, self.anchor, temperature=1.0, ot_cost=ot_cost)()
 
                 # 2. 重新 forward 得到全新子损失，求梯度范数（绝无二此错误）
                 grad_norms = torch.stack([
                     self._grad_norm(lambda logits, y, _: self.loss_func(logits, y),
                                     images, labels, None),
                     self._grad_norm(lambda logits, y, _: AnchorContrastiveLoss(
-                        anchors=self.anchor, temperature=0.5, device=self.args.device
+                        anchors=contrast_anchors, temperature=0.5, device=self.args.device
                     )(features=logits, labels=y),
                                     images, labels, None),
                     self._grad_norm(lambda logits, _, t: AnchorDistillationLoss(
-                        logits, t, self.anchor, temperature=1.0)(),
+                        logits, t, self.anchor, temperature=1.0, ot_cost=ot_cost)(),
                                     images, labels, teacher_out)
                 ])
 
@@ -371,6 +422,7 @@ class LocalUpdateFedACD(object):         #完整版客户端
 
         # ---------- 聚合原型 ----------
         agg_protos_label = {}
+        proto_counts = {}
         with torch.no_grad():
             for images, labels in self.ldr_train:
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
@@ -381,15 +433,152 @@ class LocalUpdateFedACD(object):         #完整版客户端
                     feat = features[mask]
                     if feat.numel() == 0:
                         continue
+                    proto_counts[lbl] = proto_counts.get(lbl, 0) + mask.sum().item()
                     weights = torch.softmax(feat.norm(dim=1), dim=0)
                     weighted = (feat.T @ weights).T
                     agg_protos_label[lbl] = agg_protos_label.get(lbl, 0) + weighted.cpu()
             for lbl in agg_protos_label:
                 agg_protos_label[lbl] /= len(self.ldr_train)
-        
-        return net.state_dict(), sum(epoch_loss) / len(epoch_loss), agg_protos_label
+                # 归一化为单位方向向量后上传（论文公式21）
+                norm = agg_protos_label[lbl].norm() + 1e-8
+                agg_protos_label[lbl] = agg_protos_label[lbl] / norm
+
+        return net.state_dict(), sum(epoch_loss) / len(epoch_loss), agg_protos_label, proto_counts
+
 
 class AnchorDistillationLoss(nn.Module):       #原版本AD
+    def __init__(self, student_outputs, teacher_outputs, anchors, temperature=1.0,
+                 lambda_anchor=0.1, device='cuda', ot_cost='anchor_geometry'):
+        """
+        初始化锚点蒸馏损失。
+
+        Args:
+            student_outputs (torch.Tensor): 学生模型的原始输出 (logits)。
+            teacher_outputs (torch.Tensor): 教师模型的原始输出 (logits)。
+            anchors (torch.Tensor): 锚点张量。
+            temperature (float): 知识蒸馏中的温度参数 τ。
+            lambda_anchor (float): 锚点成本项的权重 λ。
+            device (str): 计算设备 ('cuda' 或 'cpu')。
+            ot_cost (str): 'anchor_geometry' or 'uniform'.
+        """
+        super(AnchorDistillationLoss, self).__init__()
+        self.temperature = temperature
+        self.lambda_anchor = lambda_anchor
+        self.student_outputs = student_outputs
+        self.teacher_outputs = teacher_outputs
+        self.device = device
+        self.ot_cost = ot_cost
+        
+        # Sinkhorn-Knopp算法参数
+        self.sinkhorn_iterations = 10
+        self.sinkhorn_epsilon = 0.1
+        
+        # 确保 anchors 的维度是 [num_classes, feature_dim]
+        # 并将其设置为不需要梯度的参数
+        self.anchors = nn.Parameter(anchors, requires_grad=False)
+        
+        # 如果锚点的特征维度与类别数不匹配，则进行调整
+        num_classes = student_outputs.size(1)
+        if self.anchors.size(0) != num_classes:
+            # 注意：这里的逻辑假设锚点的第一维是类别数，如果不是，需要调整
+            # 原始代码中是 anchors.size(1)，这里根据上下文理解调整为 anchors.size(0)
+            # 如果 anchors 的形状是 [num_anchors, feature_dim]，需要一个映射层
+            # 这里我们假设 anchors 的形状是 [num_classes, feature_dim]
+            pass # 根据实际的锚点维度设计调整逻辑
+        
+        # 注意：原adjust_anchors逻辑可能不适用于所有情况，此处保留但需谨慎使用
+        # if anchors.size(1) != num_classes:
+        #     self.anchors = self.adjust_anchors(anchors, num_classes)
+
+
+    def adjust_anchors(self, anchors, num_classes):
+        """
+        通过一个线性层调整 anchors 的特征维度以匹配 num_classes。
+        """
+        # 这个函数在当前上下文中可能不是必需的，因为成本是基于锚点内部的距离计算的
+        linear_transform = nn.Linear(anchors.size(1), num_classes).to(self.device)
+        adjusted_anchors = linear_transform(anchors)
+        return nn.Parameter(adjusted_anchors, requires_grad=False)
+
+    def sinkhorn_knopp(self, cost_matrix, p_s, p_t):
+        """
+        Sinkhorn-Knopp算法，边际约束匹配 p_s 和 p_t（论文公式4）。
+
+        Args:
+            cost_matrix (torch.Tensor): 锚点代价矩阵 [C, C]
+            p_s (torch.Tensor): 学生预测分布 [B, C]
+            p_t (torch.Tensor): 教师预测分布 [B, C]
+
+        Returns:
+            transport_matrix (torch.Tensor): 最优传输矩阵 [B, C, C]
+        """
+        batch_size = p_s.size(0)
+
+        # K = exp(-C/ε)，扩展到 batch 维度
+        K = torch.exp(
+            -cost_matrix.unsqueeze(0).expand(batch_size, -1, -1) / self.sinkhorn_epsilon
+        )  # [B, C, C]
+
+        # 初始化为实际边际（论文 U(p_S, p_T) 约束）
+        u = p_s.unsqueeze(2)   # [B, C, 1]
+        v = p_t.unsqueeze(2)   # [B, C, 1]
+
+        for _ in range(self.sinkhorn_iterations):
+            u = p_s.unsqueeze(2) / (torch.bmm(K, v) + 1e-8)
+            v = p_t.unsqueeze(2) / (torch.bmm(K.transpose(1, 2), u) + 1e-8)
+
+        transport_matrix = u * K * v.transpose(1, 2)
+        return transport_matrix
+
+    def compute_cost_matrix(self):
+        """
+        纯锚点余弦距离代价矩阵（论文公式3）：Ψ(y,y') = 1 - cos(A_y, A_y')
+        uniform 模式下使用全 1 矩阵，保留 OT 框架但去掉 anchor 几何。
+        """
+        C = self.anchors.size(0)
+        if self.ot_cost == 'uniform':
+            return torch.ones(C, C, device=self.anchors.device)
+        A_norm = F.normalize(self.anchors, p=2, dim=1)   # [C, D]
+        cost = 1.0 - torch.matmul(A_norm, A_norm.t())    # [C, C]
+        return cost
+
+    def earth_movers_distance(self, cost_matrix, transport_matrix):
+        """
+        计算Earth Mover's Distance (Wasserstein Distance)。
+
+        Args:
+            cost_matrix (torch.Tensor): 成本矩阵 [B, C, C]
+            transport_matrix (torch.Tensor): 最优传输矩阵 [B, C, C]
+
+        Returns:
+            emd_loss (torch.Tensor): EMD损失的均值
+        """
+        emd = torch.sum(transport_matrix * cost_matrix, dim=[1, 2])
+        return torch.mean(emd)
+
+    def forward(self):
+        """
+        基于锚点几何的OT蒸馏损失（论文公式3-5）。
+        代价矩阵仅由锚点余弦距离构成，Sinkhorn边际匹配 p_S 和 p_T。
+        """
+        # 学生/教师 softmax 预测分布
+        student_probs = F.softmax(self.student_outputs / self.temperature, dim=1)
+        teacher_probs = F.softmax(self.teacher_outputs / self.temperature, dim=1)
+
+        # 纯锚点余弦距离代价矩阵 [C, C]
+        cost = self.compute_cost_matrix()
+
+        # Sinkhorn 求解最优传输（边际匹配 p_S, p_T）[B, C, C]
+        transport_matrix = self.sinkhorn_knopp(cost, student_probs, teacher_probs)
+
+        # EMD 损失：∑ Π* ⊙ Ψ，扩展 cost 到 batch
+        batch_size = student_probs.size(0)
+        cost_batch = cost.unsqueeze(0).expand(batch_size, -1, -1)
+        emd_loss = self.earth_movers_distance(cost_batch, transport_matrix)
+
+        return emd_loss
+
+'''class AnchorDistillationLoss(nn.Module):       #原版本AD
     def __init__(self, student_outputs, teacher_outputs, anchors, temperature=1.0, lambda_anchor=0.1, device='cuda'):
         """
         初始化锚点蒸馏损失。
@@ -539,7 +728,8 @@ class AnchorDistillationLoss(nn.Module):       #原版本AD
         # 4. 计算Earth Mover's Distance作为最终的蒸馏损失
         emd_loss = self.earth_movers_distance(cost_matrix, transport_matrix)
         
-        return emd_loss
+        return emd_loss'''
+
 
 class LocalUpdate(object):
     def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
@@ -1578,366 +1768,9 @@ class LocalUpdateFedMTL(object):
         return net.state_dict(), cvae.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
 
-# ==================== FedTA: ResNetFedTA (Adapter-based, no hooks) ====================
 
-def _is_resnet_fedta(net):
-    """Check if net is FedTA-based (ResNetFedTA, TextCNNFedTA, or GenericFedTA)."""
-    real = net.module if hasattr(net, 'module') else net
-    return hasattr(real, 'fedta_adapter') and hasattr(real, 'state_dict_fedta')
+# ==================== FedMTL ====================
 
-
-class ESAModule(nn.Module):
-    """
-    Early-Stage Adaptation module for FedTA (Zero-Init Growth).
-    IE_bank zero-initialized; esa_gate starts closed (sigmoid(-6)≈0.002).
-    Conditional residual: x_enhanced = x_stem + 0.1 * gate * enhancement.
-    """
-    def __init__(self, num_ie, stem_channels=64, tau=0.1, device='cuda'):
-        super().__init__()
-        self.num_ie = num_ie
-        self.stem_channels = stem_channels
-        self.tau = tau
-        self.device = device
-        self.ie_bank = nn.Parameter(torch.zeros(num_ie, stem_channels, 1, 1))
-        self.keys = nn.Parameter(torch.randn(num_ie, stem_channels) * 0.01)
-        self.esa_gate = nn.Parameter(torch.tensor(-6.0))  # sigmoid(-6)≈0.002, initially off
-        self._last_q = None
-        self._last_w = None
-
-    def forward(self, x_stem):
-        # x_stem: [B, 64, H, W]
-        B, C, H, W = x_stem.shape
-        q = F.adaptive_avg_pool2d(x_stem, 1).view(B, -1)  # [B, 64]
-        self._last_q = q
-
-        # Key similarity: s_m = cos_sim(q, K_m), eps for numerical stability
-        q_norm = F.normalize(q, p=2, dim=1, eps=1e-6)
-        k_norm = F.normalize(self.keys, p=2, dim=1, eps=1e-6)
-        sim = torch.mm(q_norm, k_norm.t())  # [B, M]
-        w = F.softmax(sim / self.tau, dim=1)  # [B, M]
-        self._last_w = w
-
-        # Conditional residual: gate starts closed, grows with training
-        gate = torch.sigmoid(self.esa_gate)
-        ie_expand = self.ie_bank.unsqueeze(0)  # [1, M, 64, 1, 1]
-        w_expand = w.unsqueeze(2).unsqueeze(3).unsqueeze(4)  # [B, M, 1, 1, 1]
-        enhancement = (ie_expand * w_expand).sum(dim=1)  # [B, 64, 1, 1]
-        x_enhanced = x_stem + 0.1 * gate * enhancement
-        return x_enhanced
-
-    def get_key_loss(self, top_n=3):
-        """L_key = sum over top-N keys of ||K_m - q||^2 (per batch, mean over batch)"""
-        if self._last_q is None or self._last_w is None:
-            return torch.tensor(0.0, device=self.ie_bank.device)
-        q = self._last_q  # [B, 64]
-        w = self._last_w  # [B, M]
-        n = min(top_n, self.num_ie)
-        _, top_idx = torch.topk(w, n, dim=1)  # [B, n]
-        loss_list = []
-        for i in range(n):
-            k_idx = top_idx[:, i]  # [B]
-            K_m = self.keys[k_idx]  # [B, 64]
-            loss_list.append(((q - K_m) ** 2).sum(dim=1))
-        loss = torch.stack(loss_list, dim=1).sum(dim=1).mean() / (n + 1e-8)
-        return loss
-
-    def state_dict_esa(self):
-        return {
-            'ie_bank': self.ie_bank.data.clone(),
-            'keys': self.keys.data.clone(),
-            'esa_gate': self.esa_gate.data.clone()
-        }
-
-    def load_state_dict_esa(self, state):
-        self.ie_bank.data.copy_(state['ie_bank'])
-        self.keys.data.copy_(state['keys'])
-        if 'esa_gate' in state:
-            self.esa_gate.data.copy_(state['esa_gate'])
-
-
-class LocalUpdateFedTA(object):
-    """
-    FedTA client: ESA via forward hook, Tail Anchor mixing, L_CE + L_cons + L_key.
-    Non-intrusive: does not modify ResNet source; hook removed after training.
-    """
-    def __init__(self, args, anchor=None, dataset=None, idxs=None, task=0, pretrain=False):
-        self.args = args
-        self.loss_func = nn.CrossEntropyLoss()
-        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
-        self.pretrain = pretrain
-        self.task = task
-        self.num_classes = args.num_classes
-        self.anchor = anchor.to(args.device) if anchor is not None else None
-
-        # FedTA hyperparams (Zero-Init Growth)
-        self.num_ie = getattr(args, 'num_ie', 10)
-        self.lambda1 = getattr(args, 'fedta_lambda1', 0.1)
-        self.lambda2 = getattr(args, 'fedta_lambda2', 0.01)
-        self.tau = getattr(args, 'fedta_tau', 0.1)
-        self.tau_c = getattr(args, 'fedta_tau_c', 0.1)
-        self.beta_init_logit = getattr(args, 'fedta_beta_init_logit', -4.0)  # sigmoid(-4)≈0.018
-        self.progressive_rounds = getattr(args, 'fedta_progressive_rounds', 0)
-
-    def _get_layer1(self, net):
-        real = net.module if hasattr(net, 'module') else net
-        if hasattr(real, 'layer1'):
-            return real.layer1
-        if hasattr(real, 'backbone') and hasattr(real.backbone, 'layer1'):
-            return real.backbone.layer1
-        raise ValueError("FedTA requires ResNet with layer1 (resnet18/resnet18_imagenet)")
-
-    def _get_feat_dim(self, net):
-        real = net.module if hasattr(net, 'module') else net
-        if hasattr(real, 'linear') and hasattr(real.linear, 'in_features'):
-            return real.linear.in_features
-        return 512
-
-    def _forward_with_ta(self, net, images, labels, tail_anchors, beta):
-        """Forward: f_TA = (1-alpha)*f + alpha*A_y (interpolation), alpha=sigmoid(beta)."""
-        real = net.module if hasattr(net, 'module') else net
-        features = real.extract_features(images)  # [B, 512]
-        alpha = torch.sigmoid(beta)
-        A_y = tail_anchors[labels]  # [B, 512]
-        f_ta = (1 - alpha) * features + alpha * A_y
-        logits = real.only_liner(f_ta)
-        return logits, f_ta, features, alpha
-
-    def train(self, net, anchor=None, global_prototypes=None, kb_state=None, lr=None, round_idx=0, idx=-1, local_eps=None):
-        net.train()
-        device = self.args.device
-        lr = lr if lr is not None else self.args.lr
-        local_eps = local_eps or self.args.local_ep
-
-        real = net.module if hasattr(net, 'module') else net
-        layer1 = self._get_layer1(net)
-        feat_dim = self._get_feat_dim(net)
-
-        # Residual Anchor: server anchor as baseline, local delta init 0
-        A_base = (anchor if anchor is not None else self.anchor).to(device)
-        if A_base is None:
-            A_base = torch.randn(self.num_classes, feat_dim, device=device) * 0.01
-        A_base = A_base.clone().detach()
-        delta_A = nn.Parameter(torch.zeros_like(A_base))
-        # beta init: sigmoid(-4)≈0.018, model initially relies on ResNet features
-        beta = nn.Parameter(torch.tensor(self.beta_init_logit, device=device))
-
-        # ESA module and hook
-        esa = ESAModule(self.num_ie, stem_channels=64, tau=self.tau, device=device).to(device)
-        if kb_state is not None:
-            esa.load_state_dict_esa(kb_state)
-
-        def esa_hook_fn(module, input_tuple):
-            x = input_tuple[0]
-            x_enh = esa(x)
-            return (x_enh,)
-
-        handle = layer1.register_forward_pre_hook(esa_hook_fn)
-
-        # Freeze layer1, layer2
-        for name, p in real.named_parameters():
-            if 'layer1' in name or 'layer2' in name:
-                p.requires_grad = False
-
-        # Progressive: first N rounds train only ESA + classifier
-        if round_idx < self.progressive_rounds:
-            for name, p in real.named_parameters():
-                if 'layer3' in name or 'layer4' in name:
-                    p.requires_grad = False
-
-        # Trainable: ESA, delta_A, beta, layer3-4, linear
-        train_params = list(esa.parameters()) + [delta_A, beta]
-        train_params += [p for name, p in real.named_parameters() if p.requires_grad]
-        optimizer = torch.optim.SGD(train_params, lr=lr, momentum=self.args.momentum, weight_decay=self.args.wd)
-
-        epoch_loss = []
-        G = global_prototypes  # [num_classes, feat_dim] for L_cons
-        if G is not None:
-            G = G.to(device)
-            g_norm = G.norm(dim=1, keepdim=True).clamp(min=1e-8)
-            G = G / g_norm  # safe normalize, zero rows stay zero
-
-        for _ in range(local_eps):
-            batch_loss = []
-            for images, labels in self.ldr_train:
-                images, labels = images.to(device), labels.to(device)
-                optimizer.zero_grad()
-
-                tail_anchors = A_base + torch.tanh(delta_A) * 0.1
-                logits, f_ta, _, alpha = self._forward_with_ta(net, images, labels, tail_anchors, beta)
-                l_ce = self.loss_func(logits, labels)
-
-                # L_cons: contrastive with global prototypes
-                l_cons = torch.tensor(0.0, device=device)
-                if G is not None:
-                    f_norm = F.normalize(f_ta, p=2, dim=1, eps=1e-6)
-                    logits_c = torch.mm(f_norm, G.t()) / self.tau_c
-                    l_cons = F.cross_entropy(logits_c, labels)
-
-                l_key = esa.get_key_loss(top_n=3)
-
-                # Adaptive loss: L_cons and L_key scale with alpha (early training CE-dominated)
-                alpha_val = alpha.detach().mean()
-                lambda1_eff = self.lambda1 * alpha_val
-                lambda2_eff = self.lambda2 * alpha_val
-                loss = l_ce + lambda1_eff * l_cons + lambda2_eff * l_key
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(train_params, max_norm=1.0)
-                optimizer.step()
-                batch_loss.append(loss.item())
-            epoch_loss.append(sum(batch_loss) / len(batch_loss))
-
-        # Compute local prototypes P_k^y
-        prototypes = {}
-        net.eval()
-        with torch.no_grad():
-            tail_anchors = A_base + torch.tanh(delta_A) * 0.1
-            for images, labels in self.ldr_train:
-                images, labels = images.to(device), labels.to(device)
-                _, f_ta, _, _ = self._forward_with_ta(net, images, labels, tail_anchors, beta)
-                for y in labels.unique():
-                    y_val = y.item()
-                    mask = labels == y
-                    if mask.sum() > 0:
-                        proto = f_ta[mask].mean(dim=0).cpu()
-                        if y_val not in prototypes:
-                            prototypes[y_val] = []
-                        prototypes[y_val].append(proto)
-        for y in prototypes:
-            prototypes[y] = torch.stack(prototypes[y]).mean(dim=0)
-
-        # Remove hook
-        handle.remove()
-
-        # Load tail_anchors into net for state_dict return (we return model state without TA params)
-        w_net = real.state_dict()
-        kb_state = esa.state_dict_esa()
-
-        return w_net, kb_state, prototypes, sum(epoch_loss) / len(epoch_loss)
-
-
-class LocalUpdateFedTAAdapter(object):
-    """
-    FedTA client for ResNetFedTA (adapter-based, no hooks).
-    All layers train, weight_decay 5e-4, grad clip 5.0.
-    Prototypes: confidence filter (prob > 0.6).
-    """
-    def __init__(self, args, anchor=None, dataset=None, idxs=None, task=0, pretrain=False):
-        self.args = args
-        self.loss_func = nn.CrossEntropyLoss()
-        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
-        self.task = task
-        self.num_classes = args.num_classes
-        self.anchor = anchor.to(args.device) if anchor is not None else None
-        self.lambda1 = getattr(args, 'fedta_lambda1', 0.1)
-        self.tau_c = getattr(args, 'fedta_tau_c', 0.1)
-        self.proto_threshold = getattr(args, 'fedta_proto_threshold', 0.6)
-
-    def train(self, net, anchor=None, global_prototypes=None, kb_state=None, lr=None, round_idx=0, idx=-1, local_eps=None):
-        net.train()
-        device = self.args.device
-        lr = lr if lr is not None else self.args.lr
-        local_eps = local_eps or self.args.local_ep
-
-        real = net.module if hasattr(net, 'module') else net
-        if not _is_resnet_fedta(net):
-            raise ValueError("LocalUpdateFedTAAdapter requires ResNetFedTA (use get_fedta_model)")
-
-        if anchor is not None:
-            real.tail_anchors.data.copy_(anchor.to(device))
-        if kb_state is not None:
-            real.load_state_dict_fedta(kb_state)
-
-        # Hard freeze: conv1, bn1, layer1, layer2, layer3 stay fixed every round (for ResNet).
-        # For TextCNN and other models, we train all base parameters with a lower lr.
-        # Only layer4, the linear head, the FedTA adapter, tail_anchors, beta, and
-        # ie_keys are updated — approximating FedTA's "frozen backbone" assumption.
-        _freeze_prefixes = ('conv1', 'bn1', 'layer1', 'layer2', 'layer3')
-
-        # Check if this is a ResNet-based model (has the layer structure)
-        is_resnet = any(hasattr(real.base, layer) for layer in ['layer1', 'layer2', 'layer3', 'layer4'])
-
-        if is_resnet:
-            for name, p in real.base.named_parameters():
-                p.requires_grad = not any(
-                    name == prefix or name.startswith(prefix + '.')
-                    for prefix in _freeze_prefixes
-                )
-
-        wd = getattr(self.args, 'fedta_wd', 5e-4)
-        param_groups = [
-            # FedTA-specific: adapter, tail anchors, blending coefficient, IE keys
-            {'params': list(real.fedta_adapter.parameters()) + [real.tail_anchors, real.beta, real.ie_keys], 'lr': lr * 0.1},
-        ]
-
-        # For ResNet: only train layer4 + linear (requires_grad filters out frozen layers)
-        # For TextCNN/others: train all base parameters with reduced lr
-        if is_resnet:
-            param_groups.append(
-                # Trainable base: layer4 + linear classifier
-                {'params': [p for p in real.base.parameters() if p.requires_grad], 'lr': lr}
-            )
-        else:
-            # Non-ResNet models: train all base params with reduced lr
-            param_groups.append(
-                {'params': [p for p in real.base.parameters()], 'lr': lr * 0.5}
-            )
-        optimizer = torch.optim.SGD(param_groups, momentum=0.9, weight_decay=wd)
-
-        epoch_loss = []
-        G = global_prototypes
-        if G is not None:
-            G = G.to(device)
-            g_norm = G.norm(dim=1, keepdim=True).clamp(min=1e-8)
-            G = G / g_norm
-
-        for _ in range(local_eps):
-            batch_loss = []
-            for images, labels in self.ldr_train:
-                images, labels = images.to(device), labels.to(device)
-                optimizer.zero_grad()
-                logits, f = net(images, return_features=True)
-                l_ce = self.loss_func(logits, labels)
-                l_cons = torch.tensor(0.0, device=device)
-                if G is not None:
-                    f_norm = F.normalize(f, p=2, dim=1, eps=1e-6)
-                    logits_c = torch.mm(f_norm, G.t()) / self.tau_c
-                    l_cons = F.cross_entropy(logits_c, labels)
-                loss = l_ce + self.lambda1 * l_cons
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=5.0)
-                optimizer.step()
-                batch_loss.append(loss.item())
-            epoch_loss.append(sum(batch_loss) / len(batch_loss))
-
-        prototypes = self._compute_prototypes_safe(net, device)
-        return net.state_dict(), real.state_dict_fedta(), prototypes, sum(epoch_loss) / len(epoch_loss)
-
-    def _compute_prototypes_safe(self, net, device):
-        """Only use high-confidence (correct & prob > threshold) samples."""
-        prototypes = {}
-        net.eval()
-        th = self.proto_threshold
-        with torch.no_grad():
-            for images, labels in self.ldr_train:
-                images, labels = images.to(device), labels.to(device)
-                logits, f = net(images, return_features=True)
-                probs = F.softmax(logits, dim=1)
-                max_prob, pred = probs.max(dim=1)
-                mask = (pred == labels) & (max_prob > th)
-                for y in labels.unique():
-                    y_val = y.item()
-                    y_mask = (labels == y) & mask
-                    if y_mask.sum() > 0:
-                        proto = f[y_mask].mean(dim=0).cpu()
-                        if y_val not in prototypes:
-                            prototypes[y_val] = []
-                        prototypes[y_val].append(proto)
-        for y in prototypes:
-            prototypes[y] = torch.stack(prototypes[y]).mean(dim=0)
-        return prototypes
-
-
-class LocalUpdateLWF(object):
     """
     Learning without Forgetting (LwF) Local Update for Federated Learning.
     
@@ -2103,135 +1936,5 @@ class LocalUpdateLWF(object):
         # Clean up old model
         if has_old_model:
             del old_net
-        
-        return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
-
-
-class LocalUpdateFedCLASS(object):
-    """
-    FedCLASS Local Update for Federated Learning (Fixed Label Space Version).
-    
-    Implements self-distillation from the historical global model to constrain
-    local optimization and mitigate client drift in Non-IID scenarios.
-    
-    Loss function:
-    L = L_ce + λ * L_distill
-    where:
-    - L_ce: Cross-entropy loss for supervised learning
-    - L_distill: KL divergence between historical and current model outputs
-    
-    Reference: FedCLASS.md - Algorithm for fixed label space
-    """
-    
-    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
-        self.args = args
-        self.loss_func = nn.CrossEntropyLoss()
-        self.selected_clients = []
-        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
-        self.pretrain = pretrain
-        
-        # FedCLASS specific hyperparameters
-        self.lambda_distill = getattr(args, 'fedclass_lambda', 1.0)
-        self.temperature = getattr(args, 'fedclass_temperature', 2.0)
-        
-    def distillation_loss(self, hist_logits, curr_logits):
-        """
-        Compute self-distillation loss using KL divergence.
-        
-        L_distill = KL(p_hist || p_curr) * T^2
-        where p_hist and p_curr are temperature-scaled softmax outputs.
-        
-        Args:
-            hist_logits: Logits from frozen historical model
-            curr_logits: Logits from current model being trained
-            
-        Returns:
-            KL divergence loss scaled by T^2
-        """
-        # Temperature-scaled log-softmax for both models
-        hist_log_probs = F.log_softmax(hist_logits / self.temperature, dim=1)
-        curr_log_probs = F.log_softmax(curr_logits / self.temperature, dim=1)
-        
-        # KL divergence: D_KL(hist || curr) = sum(hist * (log(hist) - log(curr)))
-        kl_div = F.kl_div(curr_log_probs, hist_log_probs, reduction='batchmean', log_target=True)
-        
-        # Scale by T^2 as per Hinton's distillation paper
-        return kl_div * (self.temperature ** 2)
-    
-    def train(self, net, hist_net_state, lr, idx=-1, local_eps=None):
-        """
-        Train with FedCLASS self-distillation algorithm.
-        
-        L = L_ce + λ * L_distill
-        
-        Args:
-            net: Local model (current model to be trained)
-            hist_net_state: State dict of frozen historical model (previous round's global model)
-            lr: Learning rate
-            idx: Client index
-            local_eps: Number of local epochs
-            
-        Returns:
-            Tuple of (model state dict, average loss)
-        """
-        net.train()
-        
-        # Initialize optimizer
-        optimizer = torch.optim.SGD(net.parameters(), lr=lr,
-                                    momentum=self.args.momentum,
-                                    weight_decay=self.args.wd)
-        
-        epoch_loss = []
-        
-        if local_eps is None:
-            if self.pretrain:
-                local_eps = self.args.local_ep_pretrain
-            else:
-                local_eps = self.args.local_ep
-        
-        # Create and freeze historical model for distillation
-        if hist_net_state is not None:
-            from utils.train_utils import get_model
-            hist_net = get_model(self.args)
-            hist_net.load_state_dict(hist_net_state)
-            hist_net.to(self.args.device)
-            hist_net.eval()
-            has_hist_model = True
-        else:
-            has_hist_model = False
-        
-        for iter in range(local_eps):
-            batch_loss = []
-            for batch_idx, (images, labels) in enumerate(self.ldr_train):
-                images, labels = images.to(self.args.device), labels.to(self.args.device)
-                
-                # Forward pass with current model
-                logits = net(images)
-                
-                # Cross-entropy loss (L_ce)
-                ce_loss = self.loss_func(logits, labels)
-                
-                # Self-distillation loss (L_distill)
-                distill_loss = torch.tensor(0.0, device=self.args.device)
-                if has_hist_model:
-                    with torch.no_grad():
-                        hist_logits = hist_net(images)
-                    distill_loss = self.distillation_loss(hist_logits, logits)
-                
-                # Total loss: L = L_ce + λ * L_distill
-                total_loss = ce_loss + self.lambda_distill * distill_loss
-                
-                # Backward pass
-                optimizer.zero_grad()
-                total_loss.backward()
-                optimizer.step()
-                
-                batch_loss.append(total_loss.item())
-            
-            epoch_loss.append(sum(batch_loss) / len(batch_loss))
-        
-        # Clean up historical model
-        if has_hist_model:
-            del hist_net
         
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)

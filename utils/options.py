@@ -51,6 +51,9 @@ def args_parser():
     parser.add_argument('--load_fed', type=str, default='', help='define pretrained federated model path')
     parser.add_argument('--results_save', type=str, default='/', help='define fed results save folder')
     parser.add_argument('--start_saving', type=int, default=0, help='when to start saving models')
+    parser.add_argument('--benchmark_runtime', action='store_true', help='measure per-round client/server runtime and save CSV')
+    parser.add_argument('--runtime_csv', type=str, default='', help='output CSV path for runtime benchmark')
+    parser.add_argument('--skip_eval', action='store_true', help='skip evaluation during training (auto-enabled with --benchmark_runtime)')
     
     # evaluation arguments
     parser.add_argument('--ft_ep', type=int, default=5, help="the number of epochs for fine-tuning")
@@ -93,6 +96,7 @@ def args_parser():
     parser.add_argument('--meta-lr', type=float, default=0.9, help="Student learning rate")
     parser.add_argument('--sample_bs', type = int, default = 32)
     parser.add_argument('--cvae_lr', type=float, default=1e-3, help="CVAE learning rate for FedMTL")
+    parser.add_argument('--prompt_dim', type=int, default=64, help='RefFiL prompt dimension')
 
     # FedTA arguments
     parser.add_argument('--num_ie', type=int, default=10, help='FedTA: Knowledge Base size M')
@@ -112,6 +116,17 @@ def args_parser():
     parser.add_argument('--lwf_temperature', type=float, default=2, help='LwF: temperature for knowledge distillation')
     parser.add_argument('--lwf_lambda', type=float, default=1.0, help='LwF: balance weight for old task loss')
     parser.add_argument('--lwf_warmup_epochs', type=int, default=0, help='LwF: warm-up phase epochs (0=disabled)')
+
+    # FLOAM ablation flags (each isolates ONE component; default = full FLOAM)
+    parser.add_argument('--ot_cost', type=str, default='anchor_geometry',
+                        choices=['anchor_geometry', 'uniform'],
+                        help='OT cost: anchor cosine (full) vs uniform (no geometry)')
+    parser.add_argument('--contrast_target', type=str, default='shared',
+                        choices=['shared', 'local_mean', 'classifier'],
+                        help='Contrastive positive target: global anchor vs local class mean vs classifier weights')
+    parser.add_argument('--anchor_agg', type=str, default='client_balanced',
+                        choices=['client_balanced', 'sample_weighted'],
+                        help='Server anchor aggregation: equal per-client vs sample-weighted')
 
     args = parser.parse_args()
     return args

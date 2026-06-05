@@ -79,20 +79,33 @@ def agg_func(protos):
     return protos
 
 
-def proto_aggregation(local_protos_list):
+def proto_aggregation(local_protos_list, local_counts_list=None, mode='client_balanced'):
     agg_protos_label = dict()
+    if mode == 'sample_weighted' and local_counts_list is not None:
+        class_items = dict()
+        for idx in local_protos_list:
+            local_protos = local_protos_list[idx]
+            local_counts = local_counts_list.get(idx, {})
+            for label, proto in local_protos.items():
+                count = local_counts.get(label, 1)
+                class_items.setdefault(label, []).append((proto, count))
+        for label, items in class_items.items():
+            total = sum(c for _, c in items)
+            weighted = sum(proto * (c / total) for proto, c in items)
+            agg_protos_label[label] = weighted
+        return agg_protos_label
+
     for idx in local_protos_list:
         local_protos = local_protos_list[idx]
         for label in local_protos.keys():
             if label in agg_protos_label:
-                # agg_protos_label[label].append(local_protos[label])
-                agg_protos_label[label] = torch.cat((agg_protos_label[label], torch.unsqueeze(local_protos[label], 0)), dim = 0)
+                agg_protos_label[label] = torch.cat(
+                    (agg_protos_label[label], torch.unsqueeze(local_protos[label], 0)), dim=0)
             else:
                 agg_protos_label[label] = torch.unsqueeze(local_protos[label], 0)
 
     for k in agg_protos_label.keys():
         agg_protos_label[k] = torch.mean(agg_protos_label[k], dim=0)
-
 
     return agg_protos_label
 
