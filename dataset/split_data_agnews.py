@@ -32,7 +32,7 @@ datasetroot_dir = "./agnews"
 train_file = os.path.join(datasetroot_dir, "train.csv") 
 test_file = os.path.join(datasetroot_dir, "test.csv")
 
-# 生成数据集存储地址
+# Dataset output path
 basedir = "./agnews-dir-{}-task-{}".format(alpha, num_task)
 if not os.path.exists(basedir):
     os.mkdir(basedir)
@@ -65,7 +65,7 @@ def load_ag_news_data(train_file, test_file, max_features=20000, max_len=200):
     # Load training data
     if os.path.exists(train_file):
         train_df = pd.read_csv(train_file)
-        # 重命名列以便后续处理
+        # Rename columns for processing
         train_df.columns = ['class', 'title', 'description']
     else:
         print(f"Error: {train_file} not found.")
@@ -74,7 +74,7 @@ def load_ag_news_data(train_file, test_file, max_features=20000, max_len=200):
     # Load test data
     if os.path.exists(test_file):
         test_df = pd.read_csv(test_file)
-        # 重命名列以便后续处理
+        # Rename columns for processing
         test_df.columns = ['class', 'title', 'description']
     else:
         print(f"Error: {test_file} not found.")
@@ -152,16 +152,16 @@ image_per_client = [[] for _ in range(num_client)]
 label_per_client = [[] for _ in range(num_client)]
 statistic = [[] for _ in range(num_client)]
 
-# 记录索引的字典 key = client编号  value = []索引list
+# Index mapping: client_id -> list of indices
 dataidx_map = {}
-# 每一个数据的索引
+# All sample indices
 idxs = np.array(range(len(total_label)))
-# 每一个类数据的索引
+# Per-class sample indices
 idx_for_each_class = []
 for i in range(num_classes):
     idx_for_each_class.append(idxs[total_label == i])
 
-# 对每类数据操作 - 均匀分布给各个客户端
+# Distribute each class evenly across clients
 for i in range(num_classes):
     num_samples = len(idx_for_each_class[i])
     num_per_client = num_samples / num_client
@@ -180,7 +180,7 @@ for i in range(num_classes):
             dataidx_map[client] = np.append(dataidx_map[client], idx_for_each_class[i][idx:idx + num_sample], axis=0)
         idx += num_sample
 
-# 遍历每个客户端,得到每个客户端的数据分布统计
+# Collect per-client label distribution stats
 df = pd.DataFrame(columns=[str(i) for i in range(num_classes)])
 for client in range(num_client):
     idxs = dataidx_map[client]
@@ -211,7 +211,7 @@ col.append('client')
 col.append('task')
 df = pd.DataFrame(columns=col)
 
-# 将每类数据按照迪利克雷分布分配给每个任务
+# Split each class across tasks via Dirichlet
 for client_id in range(num_client):
     client_data = image_per_client[client_id]
     client_dataset_label = label_per_client[client_id]
@@ -219,7 +219,7 @@ for client_id in range(num_client):
     Y = [[] for _ in range(num_task)]
     client_idx_map = {}
 
-    # 类增量模式 - 所有任务都包含所有类别
+    # Class-incremental: all tasks include all classes
     for task in range(num_task):
         start_class = 0
         end_class = num_classes - 1
@@ -231,8 +231,8 @@ for client_id in range(num_client):
             if len(idx_k) > 0:
                 np.random.shuffle(idx_k)
                 proportions = np.random.dirichlet(np.repeat(alpha, num_task))
-                proportions = np.clip(proportions, a_min=0.05, a_max=None)  # 确保最小比例
-                proportions /= proportions.sum()  # 归一化
+                proportions = np.clip(proportions, a_min=0.05, a_max=None)  # Enforce minimum proportion
+                proportions /= proportions.sum()  # Renormalize
                 proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
                 idx_batch = [idx_j + idx.tolist() for idx_j, idx in zip(idx_batch, np.split(idx_k, proportions))]
 
@@ -245,7 +245,7 @@ for client_id in range(num_client):
         row[num_classes + 1] = task_id
         idxs = client_idx_map[task_id]
         Y[task_id] = client_dataset_label[idxs].astype(np.int64)
-        X[task_id] = client_data[idxs].astype(np.int64)  # 确保文本数据保持为整数类型
+        X[task_id] = client_data[idxs].astype(np.int64)  # Keep text data as int64
 
         info = []
         for i in np.unique(Y[task_id]):
@@ -259,7 +259,7 @@ for client_id in range(num_client):
 
     print("=" * 50 + "\n\n")
 
-    # 保存数据
+    # Save split data
     train_data, test_data = split_data(X, Y)
 
     if not os.path.exists(basedir + "/train"):
@@ -273,7 +273,7 @@ for client_id in range(num_client):
 
 df.to_csv(basedir + "/task-statics.csv")
 
-# 合并所有测试数据
+# Merge all test splits
 path = basedir + '/test/'
 all_test_data = {}
 for client_id in range(num_client):

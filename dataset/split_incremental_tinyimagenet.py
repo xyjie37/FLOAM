@@ -7,23 +7,23 @@ from torchvision import transforms
 from PIL import Image
 from data_util import split_data, save_file
 
-# 1. 参数设置
+# 1. Parameters
 num_client = 20
 num_task = 10
 num_classes = 200
-alpha = 0.5  # 狄利克雷分布参数，控制客户端数据异构性
+alpha = 0.5  # Dirichlet parameter controlling client heterogeneity
 np.random.seed(2266)
 
-# 数据集存储地址
+# Dataset storage path
 datasetroot_dir = "/root/tiny-imagenet-200"
-# 生成数据集存储地址
+# Output dataset path
 basedir = "./tinyimagenet-incremental-{}-task-{}".format(alpha, num_task)
 if not os.path.exists(basedir):
     os.makedirs(basedir)
 
-# 2. Tiny-ImageNet 数据集加载
+# 2. Tiny-ImageNet dataset loading
 class TinyImageNetDataset:
-    """自定义TinyImageNet数据集加载类"""
+    """Custom TinyImageNet dataset loader"""
     def __init__(self, root_dir, mode='train', class_to_idx=None):
         self.root_dir = root_dir
         self.mode = mode
@@ -71,7 +71,7 @@ total_image = np.array([np.array(Image.open(p).convert('RGB')) for p in total_im
 print(f"Total images loaded: {total_image.shape}")
 print(f"Total labels loaded: {total_label.shape}")
 
-# 3. 使用狄利克雷分布将数据集分配给客户端 (阶段一)
+# 3. Assign dataset to clients via Dirichlet distribution (Phase 1)
 image_per_client = [[] for _ in range(num_client)]
 label_per_client = [[] for _ in range(num_client)]
 statistic = [[] for _ in range(num_client)]
@@ -80,16 +80,16 @@ dataidx_map = {}
 idxs = np.array(range(len(total_label)))
 idx_for_each_class = [idxs[total_label == i] for i in range(num_classes)]
 
-# 为每个类别生成客户端的样本分布
+# Generate per-client sample distribution for each class
 dirichlet_dist = np.random.dirichlet([alpha] * num_client, num_classes)
 
 for i in range(num_classes):
     class_indices = idx_for_each_class[i]
     num_images = len(class_indices)
     
-    # 根据狄利克雷分布的比例，计算每个客户端应分配的样本数
+    # Compute per-client sample counts from Dirichlet proportions
     client_distribution = np.round(dirichlet_dist[i] * num_images).astype(int)
-    # 修正由于四舍五入可能导致的总数不匹配问题
+    # Fix rounding mismatch
     diff = num_images - client_distribution.sum()
     client_distribution[-1] += diff
     
@@ -104,7 +104,7 @@ for i in range(num_classes):
             dataidx_map[client] = np.append(dataidx_map[client], assigned_indices, axis=0)
         current_pos += num_sample
 
-# 收集每个客户端的数据并记录统计信息
+# Gather per-client data and record statistics
 df_client = pd.DataFrame(columns=[str(i) for i in range(num_classes)])
 for client in range(num_client):
     client_idxs = dataidx_map[client].astype(int)
@@ -127,7 +127,7 @@ for client in range(num_client):
     print(f"Client {client}\t Size of data: {len(image_per_client[client])}\t Num of Classes: {len(np.unique(label_per_client[client]))}")
     print("=" * 60)
 
-# 4. 将每个客户端的数据按“类增量”模式分配到任务 (阶段二)
+# 4. Split each client's data into class-incremental tasks (Phase 2)
 df_task = pd.DataFrame(columns=[str(i) for i in range(num_classes)] + ['client', 'task'])
 classes_per_task = num_classes // num_task
 
@@ -140,14 +140,14 @@ for client_id in range(num_client):
     Y_tasks = [[] for _ in range(num_task)]
     client_idx_map = {}
 
-    # 为该客户端的数据划分任务
+    # Split this client's data into tasks
     for task_id in range(num_task):
-        # 定义当前任务包含的类别
+        # Define classes for current task
         start_class = task_id * classes_per_task
         end_class = (task_id + 1) * classes_per_task
         task_classes = list(range(start_class, end_class))
 
-        # 找到客户端数据中属于这些类别的样本索引
+        # Find samples in client data belonging to these classes
         task_idx = []
         for k in task_classes:
             idx_k = np.where(client_labels == k)[0]
@@ -156,7 +156,7 @@ for client_id in range(num_client):
         
         client_idx_map[task_id] = np.array(task_idx)
 
-    # 整理每个任务的数据并记录统计信息
+    # Organize each task's data and record statistics
     for task_id in range(num_task):
         row = [0] * (num_classes + 2)
         row[num_classes] = client_id
@@ -181,8 +181,8 @@ for client_id in range(num_client):
         print(f"Client {client_id} Task {task_id}\t Size: {len(X_tasks[task_id])}\t Labels: {np.unique(Y_tasks[task_id])}")
         print("-" * 60)
 
-    # 5. 保存该客户端所有任务的数据
-    # 对图像数据应用transform
+    # 5. Save this client's task data
+    # Apply transform to image data
     X_tasks_transformed = []
     norm_transform = transforms.Normalize(mean=[0.4802, 0.4481, 0.3975], std=[0.2302, 0.2265, 0.2262])
     for task_images in X_tasks:
@@ -206,7 +206,7 @@ for client_id in range(num_client):
 
 df_task.to_csv(os.path.join(basedir, "task-statics.csv"))
 
-# 6. 合并所有客户端的测试数据
+# 6. Merge all clients' test data
 print("\nAggregating all test data...")
 path = os.path.join(basedir, 'test/')
 all_test_data = {'x': [], 'y': []}

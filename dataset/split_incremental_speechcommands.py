@@ -19,14 +19,14 @@ from torchaudio.datasets import SPEECHCOMMANDS
 from data_util import split_data, save_file
 
 num_client = 20
-num_task = 5  # 可以设置为 5 或 10
+num_task = 5  # Can be set to 5 or 10
 num_classes = 30  # Speech Commands v1 has 30 classes
 alpha = 0.5
 np.random.seed(2266)
 
-# 数据集存储地址
+# Dataset storage path
 datasetroot_dir = "./speechcommands"
-# 生成数据集存储地址
+# Output dataset path
 basedir = "./speechcommands-incremental-{}-task-{}".format(alpha, num_task)
 if not os.path.exists(basedir):
     os.mkdir(basedir)
@@ -75,7 +75,7 @@ all_datasets = [train_dataset, val_dataset, test_dataset]
 
 # Audio preprocessing parameters
 sample_rate = 16000
-n_mels = 32  # 32个mel频率bins
+n_mels = 32  # 32 mel frequency bins
 n_fft = 2048
 hop_length = 512
 
@@ -143,32 +143,32 @@ print(f"Total samples: {len(total_data)}")
 print(f"Data shape: {total_data.shape}")
 print(f"Unique labels: {np.unique(total_labels)}")
 
-# 每个客户端的数据和标签
+# Per-client data and labels
 image_per_client = [[] for _ in range(num_client)]
 label_per_client = [[] for _ in range(num_client)]
 statistic = [[] for _ in range(num_client)]
 
-# 记录索引的字典 key = client编号  value = []索引list
+# Index mapping: client_id -> list of indices
 dataidx_map = {}
-# 每一个数据的索引
+# All sample indices
 idxs = np.array(range(len(total_labels)))
-# 每一个类数据的索引
+# Per-class sample indices
 idx_for_each_class = []
 for i in range(num_classes):
     idx_for_each_class.append(idxs[total_labels == i])
 
-# 使用狄利克雷分布分配数据给每个客户端
+# Assign data to each client using Dirichlet distribution
 dirichlet_dist = np.random.dirichlet([alpha] * num_client, num_classes)
 for i in range(num_classes):
     num_images = len(idx_for_each_class[i])
     if num_images == 0:
         continue
     client_distribution = np.round(dirichlet_dist[i] * num_images).astype(int)
-    # 处理可能的舍入误差
+    # Handle possible rounding errors
     if client_distribution.sum() < num_images:
         client_distribution[-1] += num_images - client_distribution.sum()
     elif client_distribution.sum() > num_images:
-        # 减少最大值
+        # Reduce from largest
         max_idx = np.argmax(client_distribution)
         client_distribution[max_idx] -= client_distribution.sum() - num_images
     
@@ -183,7 +183,7 @@ for i in range(num_classes):
             dataidx_map[client] = np.append(dataidx_map[client], idx_for_each_class[i][idx:idx + num_sample], axis=0)
         idx += num_sample
 
-# 遍历每个客户端,得到每个客户端的索引
+# Collect per-client indices
 df = pd.DataFrame(columns=[str(i) for i in range(num_classes)])
 for client in range(num_client):
     if client in dataidx_map:
@@ -226,13 +226,13 @@ col.append('client')
 col.append('task')
 df = pd.DataFrame(columns=col)
 
-# 类增量模式 - 将30个类分配到不同任务中
+# Class-incremental mode - distribute 30 classes across tasks
 classes_per_task = num_classes // num_task
 remaining_classes = num_classes % num_task
 
 for client_id in range(num_client):
     if len(image_per_client[client_id]) == 0:
-        # 为没有数据的客户端创建空任务
+        # Create empty tasks for clients with no data
         for task_id in range(num_task):
             row = [0 for i in range(num_classes + 2)]
             row[num_classes] = client_id
@@ -250,7 +250,7 @@ for client_id in range(num_client):
         start_class = task * classes_per_task
         end_class = (task + 1) * classes_per_task - 1
         
-        # 为前几个任务分配额外的类，处理不能整除的情况
+        # Assign extra classes to first few tasks to handle indivisible case
         if task < remaining_classes:
             end_class += 1
             start_class += task
@@ -262,7 +262,7 @@ for client_id in range(num_client):
 
         task_idx = []
         for k in task_classes:
-            if k < num_classes:  # 确保不超出类别范围
+            if k < num_classes:  # Guard against out-of-range classes
                 idx_k = np.where(client_dataset_label == k)[0]
                 task_idx.extend(idx_k)
 
@@ -294,7 +294,7 @@ for client_id in range(num_client):
         print("-" * 50)
         print("=" * 50 + "\n\n")
 
-    # 保存数据
+    # Save split data
     train_data, test_data = split_data(X, Y)
 
     if not os.path.exists(basedir + "/train"):

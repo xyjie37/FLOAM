@@ -10,46 +10,45 @@ from torch.nn.utils import clip_grad_norm_
 
 
 def create_anchor(class_num=10, dim=32):
-    # 正交初始化（转置后处理，使行向量正交）
+    # Orthogonal init (transpose trick so rows are orthogonal)
     anchors = torch.nn.Parameter(torch.empty(class_num, dim))
-    torch.nn.init.orthogonal_(anchors.T)  # 对转置矩阵正交化，使原始行向量正交
+    torch.nn.init.orthogonal_(anchors.T)  # orthogonalize transpose so original rows are orthogonal
     return anchors.detach()
 '''def create_anchor(class_num=10, dim=32):
-    # 初始化参数
+    # Init params
     anchors = torch.nn.Parameter(torch.randn(class_num, dim))
     optimizer = torch.optim.AdamW([anchors], lr=0.03, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1000)
     
-    # 动态参数配置
+    # Dynamic margin config
     base_margin = 1.2
     decay_rate = 0.995
     
     for epoch in range(1000):
-        # 动态调整参数
+        # Adjust margin
         current_margin = base_margin * (decay_rate ** epoch)
         
-        # 距离矩阵计算
+        # Distance matrix
         dist = torch.cdist(anchors, anchors, p=2)
         eye_mask = torch.eye(class_num, dtype=bool)
         
-        # 修正后的损失计算
-        # 类内距离最小化（对角线元素即同类）
+        # Intra-class: minimize diagonal distances
         intra_loss = torch.mean(dist[eye_mask] ** 2)
         
-        # 类间距离最大化（保留margin机制）
+        # Inter-class: maximize with margin
         inter_loss = torch.mean(torch.relu(current_margin - dist[~eye_mask]) ** 2)
         
-        # 组合损失（调整权重平衡）
+        # Combined loss
         loss = intra_loss + 3.0 * inter_loss
         
-        # 优化步骤
+        # Optimize
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_([anchors], 1.0)
         optimizer.step()
         scheduler.step()
         
-        # 监控输出
+        # Log progress
         if (epoch+1) % 100 == 0:
             with torch.no_grad():
                 avg_intra = dist[eye_mask].mean().item()

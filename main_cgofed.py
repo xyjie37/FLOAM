@@ -20,7 +20,7 @@ import pdb
 from collections import defaultdict
 from sklearn.decomposition import PCA
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  # 新增
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  # Added
 
 def compute_similarity_matrix(client_matrices, server_matrices, target_dim=128):
     """
@@ -31,9 +31,9 @@ def compute_similarity_matrix(client_matrices, server_matrices, target_dim=128):
     def pca_gpu(matrix, n_components):
         X = torch.from_numpy(matrix).float().to(device)
         X = X - X.mean(0)
-        # torch.linalg.svd 支持在 GPU 上跑
+        # torch.linalg.svd supports GPU execution
         U, S, Vh = torch.linalg.svd(X, full_matrices=False)
-        # 主成分投影
+        # Principal component projection
         return (X @ Vh[:n_components].T).cpu().numpy()
 
     similarity_matrix = {}
@@ -89,18 +89,18 @@ def aggregate_representation_matrices(client_matrices):
     Aggregate representation matrices from clients.
     Ensure all matrices have the same shape by padding or truncating.
     """
-    # 获取所有矩阵的最大行数和列数
+    # Get max rows and cols across all matrices
     max_rows = max(matrix.shape[0] for matrix in client_matrices.values())
     max_cols = max(matrix.shape[1] for matrix in client_matrices.values())
 
-    # 对每个矩阵进行填充，使其形状一致
+    # Pad each matrix to uniform shape
     padded_matrices = []
     for matrix in client_matrices.values():
-        padded_matrix = np.zeros((max_rows, max_cols))  # 初始化为零矩阵
-        padded_matrix[:matrix.shape[0], :matrix.shape[1]] = matrix  # 填充原始数据
+        padded_matrix = np.zeros((max_rows, max_cols))  # Initialize zero matrix
+        padded_matrix[:matrix.shape[0], :matrix.shape[1]] = matrix  # Fill original data
         padded_matrices.append(padded_matrix)
 
-    # 计算均值
+    # Compute mean
     aggregated_matrix = np.mean(padded_matrices, axis=0)
     return aggregated_matrix
 
@@ -190,7 +190,7 @@ if __name__ == '__main__':
         idxs_users = np.random.choice(range(args.num_users), m, replace=False)
         # print("Round {}, lr: {:.6f}, {}".format(iter, lr, idxs_users))
         
-        task=(iter//10)%task_num#每过10个轮次进行任务切换
+        task=(iter//10)%task_num  # Task switch every 10 rounds
         print('Current task: ', task)
         uploaded_representation_matrices = {} 
         historical_basis_vectors = server_memory["basis_vectors"]
@@ -198,7 +198,7 @@ if __name__ == '__main__':
         for idx in idxs_users:
             if round_timer is not None:
                 round_timer.start_client(idx)
-            #数据集名字，序号
+            # Dataset name, index
             local = LocalUpdateCGoFed(args=args, dataset=dataset_path, idxs=idx, task = task)
             net_local = copy.deepcopy(net_local_list[idx])
             w_local, loss, task_representation_matrix = local.train(net=net_local.to(args.device), lr=lr, historical_basis_vectors=historical_basis_vectors)

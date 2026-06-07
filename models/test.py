@@ -56,17 +56,17 @@ import os
     
 #     print(all_targets)
 
-#     # 计算每个类的分类报告
+#     # Compute per-class classification report
 #     report = classification_report(all_targets, all_preds, labels=range(class_num), target_names=[f"class_{i}" for i in range(class_num)], output_dict=True, zero_division=0)
 #     df = pd.DataFrame(report).transpose()
 #     df['Class'] = [f"class_{i}" for i in range(class_num)] + ['Accuracy', 'MacroAvg', 'WeightedAvg']
-#     # 将 Class 列移动到第一列
+#     # Move Class column to first position
 #     cols = df.columns.tolist()
 #     cols = cols[-1:] + cols[:-1]
 #     df = df[cols]
     
 #     save_dir = './per_class_accuracy/'
-#     # 保存到指定目录
+#     # Save to target directory
 #     save_path = os.path.join(save_dir, f'classification_report_round{epoch}.csv')
 #     df.to_csv(save_path, index=False)
 
@@ -121,11 +121,11 @@ def test_img(net_g, datatest, args, epoch, class_num, save_folder):
     
     #print(all_targets)
 
-    # 计算每个类的分类报告
+    # Compute per-class classification report
     report = classification_report(all_targets, all_preds, labels=range(class_num), target_names=[f"class_{i}" for i in range(class_num)], output_dict=True, zero_division=0)
     df = pd.DataFrame(report).transpose()
     df['Class'] = [f"class_{i}" for i in range(class_num)] + ['Accuracy', 'MacroAvg', 'WeightedAvg']
-    # 将 Class 列移动到第一列
+    # Move Class column to first position
     cols = df.columns.tolist()
     cols = cols[-1:] + cols[:-1]
     df = df[cols]
@@ -133,7 +133,7 @@ def test_img(net_g, datatest, args, epoch, class_num, save_folder):
     #save_dir = './per_class_accuracy'
     '''if not os.path.exists(save_dir):
         os.makedirs(save_dir)'''
-    # 保存到指定目录
+    # Save to target directory
     save_path = os.path.join(save_folder, f'classification_report_round{epoch}.csv')
     df.to_csv(save_path, index=False)
 

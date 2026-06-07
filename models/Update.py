@@ -44,41 +44,41 @@ class DatasetSplit(Dataset):
 
 class AnchorContrastiveLoss(nn.Module):
     """
-    动态 Hard Negative Mining（稳定版）
-    - 用 sparsemax 近似替代离散 topk，降低梯度路径跳变；
-    - 对 s_avg 进行 EMA + Sigmoid 温度压缩，减小早期抖动灵敏度；
-    - 对 k 使用 EMA（连续化），避免硬限速的边界振荡。
+    Dynamic Hard Negative Mining (stable version).
+    - sparsemax approximates discrete topk, reducing gradient path jumps;
+    - EMA + Sigmoid temperature compression on s_avg reduces early-stage sensitivity;
+    - EMA on k (continuous) avoids boundary oscillation from hard clipping.
     """
     def __init__(self,
                  anchors,                    # [num_classes, feat_dim]
                  temperature=0.1,
                  device='cuda',
-                 momentum_s_avg=0.9,         # s_avg 的 EMA 系数
-                 s_avg_scale=3.0,            # Sigmoid 压缩强度：sigmoid((x-0.5)*scale)
-                 momentum_k=0.9,             # k 的 EMA 系数
+                 momentum_s_avg=0.9,         # EMA coeff for s_avg
+                 s_avg_scale=3.0,            # Sigmoid compression strength: sigmoid((x-0.5)*scale)
+                 momentum_k=0.9,             # EMA coeff for k
                  use_sparsemax=True):
         super().__init__()
-        # 确保 anchors 本身不携带梯度
+        # Ensure anchors themselves do not carry gradients
         self.register_buffer('anchors', anchors.detach().clone())
         self.temperature = temperature
         self.device = device
 
-        # 平滑与温度压缩相关超参
+        # Smoothing and temperature compression hyperparams
         self.momentum_s_avg = momentum_s_avg
         self.s_avg_scale = s_avg_scale
 
-        # k 的 EMA 超参
+        # EMA hyperparams for k
         self.momentum_k = momentum_k
 
-        # 使用 sparsemax 替代 soft top-k
+        # Use sparsemax instead of soft top-k
         self.use_sparsemax = use_sparsemax
 
-        # =====  关键修改：buffer 初始到与 anchors 同一 device  =====
-        dev = self.anchors.device          # 既支持 cuda 也支持 cpu
+        # Key fix: initialize buffers on the same device as anchors
+        dev = self.anchors.device          # Supports both cuda and cpu
         self.register_buffer('s_avg_ema', torch.tensor(0.5, device=dev))
         self.register_buffer('k_ema', torch.tensor(0.0, device=dev))
 
-        # 记录指标
+        # Metrics
         self.metrics = {'hard_neg_sim': 0.0, 'dynamic_k': 0, 's_avg_ema': 0.5}
 
     @staticmethod
@@ -117,7 +117,7 @@ class AnchorContrastiveLoss(nn.Module):
         
         return output
 
-    # 维度自适应（可选）
+    # Optional: adaptive anchor dimension
     def _adjust_anchor_dim(self, target_dim):
         cur = self.anchors.size(1)
         if cur == target_dim:
@@ -125,47 +125,47 @@ class AnchorContrastiveLoss(nn.Module):
         linear = nn.Linear(cur, target_dim, bias=False).to(self.anchors.device)
         with torch.no_grad():
             new_anchors = linear(self.anchors)
-        # 防止带入梯度
+        # Prevent gradient leakage
         self.anchors = new_anchors.detach().clone()
 
     def forward(self, features, labels, k=5, alpha=0.8, adaptive_k=True):
         if features.size(1) != self.anchors.size(1):
             self._adjust_anchor_dim(features.size(1))
 
-        # 余弦相似度 [B,K]
+        # Cosine similarity [B,K]
         sim = F.cosine_similarity(features.unsqueeze(1),
                                   self.anchors.unsqueeze(0), dim=2)
         logits = sim / self.temperature
         B, K = logits.shape
 
-        # mask 正样本
+        # Mask positive samples
         pos_mask = F.one_hot(labels, num_classes=K).bool()
         pos_scores = logits.gather(1, labels.view(-1, 1))  # [B,1]
         neg_logits = logits.masked_fill(pos_mask, -float('inf'))
 
-        # ------- 计算稳定的 dynamic k -------
+        # Compute stable dynamic k
         if adaptive_k:
             with torch.no_grad():
-                # 将余弦相似度 [-1,1] -> [0,1]
+                # Map cosine similarity [-1,1] -> [0,1]
                 s = ((sim.detach() + 1.0) * 0.5).mean()
 
-                # EMA 平滑 s_avg
+                # EMA smooth s_avg
                 self.s_avg_ema.mul_(self.momentum_s_avg).add_(
                     s * (1 - self.momentum_s_avg))
 
-                # Sigmoid 压缩，降低灵敏度
+                # Sigmoid compression to reduce sensitivity
                 s_bar = torch.sigmoid((self.s_avg_ema - 0.5) * self.s_avg_scale)
 
-                # 原始 k（连续域），随后再做 EMA
+                # Raw k (continuous), then EMA
                 raw_k = torch.clamp(
                     k + torch.round(s_bar * (K - 1)).to(self.s_avg_ema.dtype),
                     min=1, max=K - 1)
 
-                # 初始化 k_ema
+                # Initialize k_ema
                 if self.k_ema.item() == 0.0:
                     self.k_ema.copy_(raw_k)
 
-                # EMA 连续化 k
+                # EMA continuous k
                 self.k_ema.mul_(self.momentum_k).add_(
                     raw_k * (1 - self.momentum_k))
                 dynamic_k = int(
@@ -173,16 +173,16 @@ class AnchorContrastiveLoss(nn.Module):
         else:
             dynamic_k = k
 
-        # ------- sparsemax 近似（可导、连续） -------
+        # Sparsemax approximation (differentiable, continuous)
         eps = 1e-12
         if self.use_sparsemax:
-            # sparsemax 用于选择 hard-negative support，不作为概率权重参与 score 计算
+            # sparsemax selects hard-negative support, not used as probability weights
             w = self.sparsemax(neg_logits, dim=1)  # [B,K]
 
-            # support：sparsemax 权重大于 0 的负类位置
+            # support: negative classes with positive sparsemax weight
             support_mask = (w > 0)  # [B, K]
 
-            # 在 support 上直接做 log-sum-exp，保留 hard-negative 的真实聚合强度
+            # log-sum-exp on support, preserving hard-negative strength
             neg_logits_sparse = neg_logits.masked_fill(~support_mask, -float('inf'))
             lse_neg_sparsemax = torch.logsumexp(neg_logits_sparse,
                                                dim=1, keepdim=True)  # [B,1]
@@ -195,15 +195,15 @@ class AnchorContrastiveLoss(nn.Module):
             log_sum_hard = torch.logsumexp(
                 torch.cat([pos_scores, hard_neg], dim=1), dim=1, keepdim=True)
 
-        # 所有负样本的 log-sum-exp（作为对照项）
+        # All negatives log-sum-exp (baseline)
         log_sum_all = torch.logsumexp(neg_logits, dim=1, keepdim=True)
 
-        # 可选：自适应 alpha（平滑）
+        # Optional: adaptive alpha (smooth)
         if self.training and adaptive_k:
             with torch.no_grad():
                 if self.use_sparsemax:
                     w_sim = self.sparsemax(neg_logits, dim=1)
-                    # 在 sparsemax 选出的 support 上均匀平均，衡量 hard-negative 平均强度
+                    # Uniform average over sparsemax support
                     support_mask_sim = (w_sim > 0)  # [B, K]
                     support_size = support_mask_sim.sum(dim=1).clamp(min=1).float()  # [B]
                     neg_logits_clamped = neg_logits.clamp(min=-30, max=30)
@@ -216,18 +216,18 @@ class AnchorContrastiveLoss(nn.Module):
                 adapt_alpha = torch.sigmoid(hard_stat)
             alpha = 0.9 * alpha + 0.1 * adapt_alpha.item()
 
-        # 最终损失（InfoNCE 的"正 vs 组合负"混合）
+        # Final loss: InfoNCE-style "positive vs combined negatives"
         loss = -(pos_scores -
                  (alpha * log_sum_hard + (1 - alpha) * log_sum_all)).mean()
 
-        # 指标记录
+        # Metrics
         with torch.no_grad():
             self.metrics['dynamic_k'] = dynamic_k
             self.metrics['s_avg_ema'] = float(self.s_avg_ema.item())
             if self.use_sparsemax:
                 sim_neg = sim.masked_fill(pos_mask, -1e9)
                 w_sim = self.sparsemax(neg_logits, dim=1)
-                # 在 support 上均匀平均，与 hard-negative support 定义一致
+                # Uniform average over support, consistent with hard-negative definition
                 support_mask_m = (w_sim > 0)
                 support_size_m = support_mask_m.sum(dim=1).clamp(min=1).float()
                 self.metrics['hard_neg_sim'] = float(
@@ -241,7 +241,7 @@ class AnchorContrastiveLoss(nn.Module):
         return loss
 
 
-class LocalUpdateFedACD(object):         #完整版客户端
+class LocalUpdateFedACD(object):         # Full client version
     def __init__(self, args, anchor=None, dataset=None, idxs=None, task=0, pretrain=False):
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
@@ -252,39 +252,39 @@ class LocalUpdateFedACD(object):         #完整版客户端
                       else torch.randn(args.num_classes, 100).to(args.device)
         self.num_classes = args.num_classes
 
-        # --------- GradNorm 解耦 ---------
+        # GradNorm decoupling
         self.delay_steps = getattr(args, 'gradnorm_delay_steps', 1)
-        self.loss_weights_queue = []          # 环形缓冲区
+        self.loss_weights_queue = []          # Ring buffer
         self.loss_weights = torch.ones(3, requires_grad=True, device=self.args.device)
         self.optimizer_weights = torch.optim.Adam([self.loss_weights], lr=0.01)
 
-    # ---------- 工具函数 ----------
+    # Utility functions
     def _enqueue_weights(self, w):
         self.loss_weights_queue.append(w.detach().clone())
         if len(self.loss_weights_queue) > self.delay_steps:
             self.loss_weights_queue.pop(0)
     def _get_delayed_weights(self):
-        """取出最早放进队列的权重供本轮训练使用"""
-        if not self.loss_weights_queue:          # 队列空时返回均匀权重
+        """Return the oldest weights in queue for current round."""
+        if not self.loss_weights_queue:          # Return uniform if empty
             return torch.ones(3, device=self.args.device)
-        return self.loss_weights_queue[0]        # 队首即“延迟权重”
+        return self.loss_weights_queue[0]        # Front = delayed weights
     @torch.no_grad()
     def _snapshot_params(self, params):
-        """返回参数的 detached 克隆，用于重新 forward"""
+        """Detached clone for re-forward."""
         return [p.clone() for p in params]
 
     def _grad_norm(self, loss_fn, inputs, targets, teacher_out=None):
         """
-        重新 forward 一次，得到全新损失张量，再求梯度范数
-        参数：
-            loss_fn :  callable，接受 (logits, targets, teacher_out) 返回损失
-            inputs  :  图像
-            targets :  标签
-            teacher_out : 教师输出（可选）
+        Re-forward to get fresh loss tensor, then compute grad norm.
+        Args:
+            loss_fn : callable taking (logits, targets, teacher_out) -> loss
+            inputs  : images
+            targets : labels
+            teacher_out : teacher output (optional)
         """
         features = self.real_net.extract_features(inputs)
         logits = self.real_net.only_liner(features)
-        loss = loss_fn(logits, targets, teacher_out)   # 全新张量，从未 backward
+        loss = loss_fn(logits, targets, teacher_out)   # Fresh tensor, never backwarded
         grads = torch.autograd.grad(
             loss, self.body_params,
             create_graph=False, only_inputs=True, allow_unused=True
@@ -337,7 +337,7 @@ class LocalUpdateFedACD(object):         #完整版客户端
             return self._get_classifier_weights(net)
         return self._compute_local_logit_means(net)
 
-    # ---------- 训练 ----------
+    # Training
     def train(self, net, teacher_net, lr, idx=-1, local_eps=None):
         net.train()
         teacher_net.eval()
@@ -355,7 +355,7 @@ class LocalUpdateFedACD(object):         #完整版客户端
         local_eps = self.args.local_ep_pretrain if self.pretrain \
                     else self.args.local_ep if local_eps is None else local_eps
 
-        # 预热队列
+        # Warm up queue
         while len(self.loss_weights_queue) < self.delay_steps:
             self._enqueue_weights(torch.ones(3, device=self.args.device))
 
@@ -367,7 +367,7 @@ class LocalUpdateFedACD(object):         #完整版客户端
             for images, labels in self.ldr_train:
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
 
-                # 1. 主 forward
+                # 1. Main forward
                 features = self.real_net.extract_features(images)
                 logits = self.real_net.only_liner(features)
 
@@ -383,7 +383,7 @@ class LocalUpdateFedACD(object):         #完整版客户端
                 distillation_loss = AnchorDistillationLoss(
                     logits, teacher_out, self.anchor, temperature=1.0, ot_cost=ot_cost)()
 
-                # 2. 重新 forward 得到全新子损失，求梯度范数（绝无二此错误）
+                # 2. Re-forward for fresh sub-losses, compute grad norms (no double-backward bug)
                 grad_norms = torch.stack([
                     self._grad_norm(lambda logits, y, _: self.loss_func(logits, y),
                                     images, labels, None),
@@ -396,14 +396,14 @@ class LocalUpdateFedACD(object):         #完整版客户端
                                     images, labels, teacher_out)
                 ])
 
-                # 3. 主损失 backward（图即释放）
+                # 3. Main loss backward (graph released)
                 delayed_w = self._get_delayed_weights()
                 loss = delayed_w[0]*loss_ce + delayed_w[1]*contrast_loss + delayed_w[2]*distillation_loss
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
-                # 4. GradNorm 更新权重
+                # 4. GradNorm update weights
                 target_norm = grad_norms.mean()
                 epsilon = 1e-6
                 loss_ratios = (grad_norms + epsilon) / (target_norm + epsilon)
@@ -420,7 +420,7 @@ class LocalUpdateFedACD(object):         #完整版客户端
                 batch_loss.append(loss.item())
             epoch_loss.append(sum(batch_loss) / len(batch_loss))
 
-        # ---------- 聚合原型 ----------
+        # Aggregate prototypes
         agg_protos_label = {}
         proto_counts = {}
         with torch.no_grad():
@@ -439,26 +439,26 @@ class LocalUpdateFedACD(object):         #完整版客户端
                     agg_protos_label[lbl] = agg_protos_label.get(lbl, 0) + weighted.cpu()
             for lbl in agg_protos_label:
                 agg_protos_label[lbl] /= len(self.ldr_train)
-                # 归一化为单位方向向量后上传（论文公式21）
+                # Normalize to unit direction before upload (paper Eq. 21)
                 norm = agg_protos_label[lbl].norm() + 1e-8
                 agg_protos_label[lbl] = agg_protos_label[lbl] / norm
 
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss), agg_protos_label, proto_counts
 
 
-class AnchorDistillationLoss(nn.Module):       #原版本AD
+class AnchorDistillationLoss(nn.Module):       # Original AD version
     def __init__(self, student_outputs, teacher_outputs, anchors, temperature=1.0,
                  lambda_anchor=0.1, device='cuda', ot_cost='anchor_geometry'):
         """
-        初始化锚点蒸馏损失。
+        Initialize anchor distillation loss.
 
         Args:
-            student_outputs (torch.Tensor): 学生模型的原始输出 (logits)。
-            teacher_outputs (torch.Tensor): 教师模型的原始输出 (logits)。
-            anchors (torch.Tensor): 锚点张量。
-            temperature (float): 知识蒸馏中的温度参数 τ。
-            lambda_anchor (float): 锚点成本项的权重 λ。
-            device (str): 计算设备 ('cuda' 或 'cpu')。
+            student_outputs (torch.Tensor): Student model raw outputs (logits).
+            teacher_outputs (torch.Tensor): Teacher model raw outputs (logits).
+            anchors (torch.Tensor): Anchor tensor.
+            temperature (float): Temperature parameter tau for distillation.
+            lambda_anchor (float): Weight lambda for anchor cost term.
+            device (str): Compute device ('cuda' or 'cpu').
             ot_cost (str): 'anchor_geometry' or 'uniform'.
         """
         super(AnchorDistillationLoss, self).__init__()
@@ -469,57 +469,54 @@ class AnchorDistillationLoss(nn.Module):       #原版本AD
         self.device = device
         self.ot_cost = ot_cost
         
-        # Sinkhorn-Knopp算法参数
+        # Sinkhorn-Knopp parameters
         self.sinkhorn_iterations = 10
         self.sinkhorn_epsilon = 0.1
         
-        # 确保 anchors 的维度是 [num_classes, feature_dim]
-        # 并将其设置为不需要梯度的参数
+        # Ensure anchors shape is [num_classes, feature_dim]
+        # and set as non-trainable parameter
         self.anchors = nn.Parameter(anchors, requires_grad=False)
         
-        # 如果锚点的特征维度与类别数不匹配，则进行调整
+        # Adjust if anchor feature dim does not match num_classes
         num_classes = student_outputs.size(1)
         if self.anchors.size(0) != num_classes:
-            # 注意：这里的逻辑假设锚点的第一维是类别数，如果不是，需要调整
-            # 原始代码中是 anchors.size(1)，这里根据上下文理解调整为 anchors.size(0)
-            # 如果 anchors 的形状是 [num_anchors, feature_dim]，需要一个映射层
-            # 这里我们假设 anchors 的形状是 [num_classes, feature_dim]
-            pass # 根据实际的锚点维度设计调整逻辑
+            # Logic assumes first dim is num_classes; adjust if needed
+            pass
         
-        # 注意：原adjust_anchors逻辑可能不适用于所有情况，此处保留但需谨慎使用
+        # Note: original adjust_anchors may not apply to all cases; use with caution
         # if anchors.size(1) != num_classes:
         #     self.anchors = self.adjust_anchors(anchors, num_classes)
 
 
     def adjust_anchors(self, anchors, num_classes):
         """
-        通过一个线性层调整 anchors 的特征维度以匹配 num_classes。
+        Adjust anchor feature dim to match num_classes via linear layer.
         """
-        # 这个函数在当前上下文中可能不是必需的，因为成本是基于锚点内部的距离计算的
+        # May not be needed since cost is based on internal anchor distances
         linear_transform = nn.Linear(anchors.size(1), num_classes).to(self.device)
         adjusted_anchors = linear_transform(anchors)
         return nn.Parameter(adjusted_anchors, requires_grad=False)
 
     def sinkhorn_knopp(self, cost_matrix, p_s, p_t):
         """
-        Sinkhorn-Knopp算法，边际约束匹配 p_s 和 p_t（论文公式4）。
+        Sinkhorn-Knopp algorithm with marginal constraints matching p_s and p_t (paper Eq. 4).
 
         Args:
-            cost_matrix (torch.Tensor): 锚点代价矩阵 [C, C]
-            p_s (torch.Tensor): 学生预测分布 [B, C]
-            p_t (torch.Tensor): 教师预测分布 [B, C]
+            cost_matrix (torch.Tensor): Anchor cost matrix [C, C]
+            p_s (torch.Tensor): Student prediction distribution [B, C]
+            p_t (torch.Tensor): Teacher prediction distribution [B, C]
 
         Returns:
-            transport_matrix (torch.Tensor): 最优传输矩阵 [B, C, C]
+            transport_matrix (torch.Tensor): Optimal transport matrix [B, C, C]
         """
         batch_size = p_s.size(0)
 
-        # K = exp(-C/ε)，扩展到 batch 维度
+        # K = exp(-C/eps), expand to batch dim
         K = torch.exp(
             -cost_matrix.unsqueeze(0).expand(batch_size, -1, -1) / self.sinkhorn_epsilon
         )  # [B, C, C]
 
-        # 初始化为实际边际（论文 U(p_S, p_T) 约束）
+        # Initialize with actual marginals (paper U(p_S, p_T) constraint)
         u = p_s.unsqueeze(2)   # [B, C, 1]
         v = p_t.unsqueeze(2)   # [B, C, 1]
 
@@ -532,8 +529,8 @@ class AnchorDistillationLoss(nn.Module):       #原版本AD
 
     def compute_cost_matrix(self):
         """
-        纯锚点余弦距离代价矩阵（论文公式3）：Ψ(y,y') = 1 - cos(A_y, A_y')
-        uniform 模式下使用全 1 矩阵，保留 OT 框架但去掉 anchor 几何。
+        Pure anchor cosine distance cost matrix (paper Eq. 3): Psi(y,y') = 1 - cos(A_y, A_y')
+        Uniform mode uses all-ones matrix, keeping OT framework but removing anchor geometry.
         """
         C = self.anchors.size(0)
         if self.ot_cost == 'uniform':
@@ -544,52 +541,52 @@ class AnchorDistillationLoss(nn.Module):       #原版本AD
 
     def earth_movers_distance(self, cost_matrix, transport_matrix):
         """
-        计算Earth Mover's Distance (Wasserstein Distance)。
+        Compute Earth Mover's Distance (Wasserstein Distance).
 
         Args:
-            cost_matrix (torch.Tensor): 成本矩阵 [B, C, C]
-            transport_matrix (torch.Tensor): 最优传输矩阵 [B, C, C]
+            cost_matrix (torch.Tensor): Cost matrix [B, C, C]
+            transport_matrix (torch.Tensor): Optimal transport matrix [B, C, C]
 
         Returns:
-            emd_loss (torch.Tensor): EMD损失的均值
+            emd_loss (torch.Tensor): Mean EMD loss
         """
         emd = torch.sum(transport_matrix * cost_matrix, dim=[1, 2])
         return torch.mean(emd)
 
     def forward(self):
         """
-        基于锚点几何的OT蒸馏损失（论文公式3-5）。
-        代价矩阵仅由锚点余弦距离构成，Sinkhorn边际匹配 p_S 和 p_T。
+        OT distillation loss based on anchor geometry (paper Eq. 3-5).
+        Cost matrix from anchor cosine distance only; Sinkhorn matches p_S and p_T.
         """
-        # 学生/教师 softmax 预测分布
+        # Student/teacher softmax prediction distributions
         student_probs = F.softmax(self.student_outputs / self.temperature, dim=1)
         teacher_probs = F.softmax(self.teacher_outputs / self.temperature, dim=1)
 
-        # 纯锚点余弦距离代价矩阵 [C, C]
+        # Pure anchor cosine distance cost matrix [C, C]
         cost = self.compute_cost_matrix()
 
-        # Sinkhorn 求解最优传输（边际匹配 p_S, p_T）[B, C, C]
+        # Sinkhorn optimal transport (marginal matching p_S, p_T) [B, C, C]
         transport_matrix = self.sinkhorn_knopp(cost, student_probs, teacher_probs)
 
-        # EMD 损失：∑ Π* ⊙ Ψ，扩展 cost 到 batch
+        # EMD loss: sum Pi* o Psi, expand cost to batch
         batch_size = student_probs.size(0)
         cost_batch = cost.unsqueeze(0).expand(batch_size, -1, -1)
         emd_loss = self.earth_movers_distance(cost_batch, transport_matrix)
 
         return emd_loss
 
-'''class AnchorDistillationLoss(nn.Module):       #原版本AD
+'''class AnchorDistillationLoss(nn.Module):       # Original AD version
     def __init__(self, student_outputs, teacher_outputs, anchors, temperature=1.0, lambda_anchor=0.1, device='cuda'):
         """
-        初始化锚点蒸馏损失。
+        Initialize anchor distillation loss.
 
         Args:
-            student_outputs (torch.Tensor): 学生模型的原始输出 (logits)。
-            teacher_outputs (torch.Tensor): 教师模型的原始输出 (logits)。
-            anchors (torch.Tensor): 锚点张量。
-            temperature (float): 知识蒸馏中的温度参数 τ。
-            lambda_anchor (float): 锚点成本项的权重 λ。
-            device (str): 计算设备 ('cuda' 或 'cpu')。
+            student_outputs (torch.Tensor): Student model raw outputs (logits).
+            teacher_outputs (torch.Tensor): Teacher model raw outputs (logits).
+            anchors (torch.Tensor): Anchor tensor.
+            temperature (float): Temperature parameter tau for distillation.
+            lambda_anchor (float): Weight lambda for anchor cost term.
+            device (str): Compute device ('cuda' or 'cpu').
         """
         super(AnchorDistillationLoss, self).__init__()
         self.temperature = temperature
@@ -598,87 +595,84 @@ class AnchorDistillationLoss(nn.Module):       #原版本AD
         self.teacher_outputs = teacher_outputs
         self.device = device
         
-        # Sinkhorn-Knopp算法参数
+        # Sinkhorn-Knopp parameters
         self.sinkhorn_iterations = 10
         self.sinkhorn_epsilon = 0.1
         
-        # 确保 anchors 的维度是 [num_classes, feature_dim]
-        # 并将其设置为不需要梯度的参数
+        # Ensure anchors shape is [num_classes, feature_dim]
+        # and set as non-trainable parameter
         self.anchors = nn.Parameter(anchors, requires_grad=False)
         
-        # 如果锚点的特征维度与类别数不匹配，则进行调整
+        # Adjust if anchor feature dim does not match num_classes
         num_classes = student_outputs.size(1)
         if self.anchors.size(0) != num_classes:
-            # 注意：这里的逻辑假设锚点的第一维是类别数，如果不是，需要调整
-            # 原始代码中是 anchors.size(1)，这里根据上下文理解调整为 anchors.size(0)
-            # 如果 anchors 的形状是 [num_anchors, feature_dim]，需要一个映射层
-            # 这里我们假设 anchors 的形状是 [num_classes, feature_dim]
-            pass # 根据实际的锚点维度设计调整逻辑
+            # Logic assumes first dim is num_classes; adjust if needed
+            pass
         
-        # 注意：原adjust_anchors逻辑可能不适用于所有情况，此处保留但需谨慎使用
+        # Note: original adjust_anchors may not apply to all cases; use with caution
         # if anchors.size(1) != num_classes:
         #     self.anchors = self.adjust_anchors(anchors, num_classes)
 
 
     def adjust_anchors(self, anchors, num_classes):
         """
-        通过一个线性层调整 anchors 的特征维度以匹配 num_classes。
+        Adjust anchor feature dim to match num_classes via linear layer.
         """
-        # 这个函数在当前上下文中可能不是必需的，因为成本是基于锚点内部的距离计算的
+        # May not be needed since cost is based on internal anchor distances
         linear_transform = nn.Linear(anchors.size(1), num_classes).to(self.device)
         adjusted_anchors = linear_transform(anchors)
         return nn.Parameter(adjusted_anchors, requires_grad=False)
 
     def sinkhorn_knopp(self, cost_matrix):
         """
-        Sinkhorn-Knopp算法实现，用于计算最优传输矩阵。
-        输入是成本矩阵 C，算法内部会计算 K = exp(-C/ε)。
+        Sinkhorn-Knopp algorithm implementation for computing optimal transport matrix.
+        Input is cost matrix C; internally computes K = exp(-C/eps).
 
         Args:
-            cost_matrix (torch.Tensor): 成本矩阵 [batch_size, num_classes, num_classes]
+            cost_matrix (torch.Tensor): Cost matrix [batch_size, num_classes, num_classes]
             
         Returns:
-            transport_matrix (torch.Tensor): 最优传输矩阵 [batch_size, num_classes, num_classes]
+            transport_matrix (torch.Tensor): Optimal transport matrix [batch_size, num_classes, num_classes]
         """
         batch_size, n, m = cost_matrix.shape
         
-        # 初始化传输矩阵 K = exp(-C/ε)
+        # Initialize transport matrix K = exp(-C/eps)
         K = torch.exp(-cost_matrix / self.sinkhorn_epsilon)
         
-        # 初始化行和列的缩放因子
+        # Initialize row and column scaling factors
         u = torch.ones(batch_size, n, 1, device=self.device) / n
         v = torch.ones(batch_size, m, 1, device=self.device) / m
         
-        # Sinkhorn迭代
+        # Sinkhorn iterations
         for _ in range(self.sinkhorn_iterations):
             u = 1.0 / (torch.bmm(K, v) + 1e-8)
             v = 1.0 / (torch.bmm(K.transpose(1, 2), u) + 1e-8)
         
-        # 计算最优传输矩阵 T = diag(u) * K * diag(v)
+        # Compute optimal transport matrix T = diag(u) * K * diag(v)
         transport_matrix = u * K * v.transpose(1, 2)
         
         return transport_matrix
     
     def compute_cost_matrix(self, student_probs, teacher_probs):
         """
-        计算总成本矩阵。
-        锚点项改用 cosine 距离（或归一化欧氏距离），其余不变。
+        Compute total cost matrix.
+        Anchor term uses cosine distance (or normalized Euclidean), rest unchanged.
         """
         batch_size, num_classes = student_probs.shape
 
-        # ---------- 概率项：与原代码一致 ----------
+        # Probability term: same as original
         student_expanded = student_probs.unsqueeze(2)   # [B, C, 1]
         teacher_expanded = teacher_probs.unsqueeze(1)   # [B, 1, C]
         prob_cost = torch.pow(student_expanded - teacher_expanded, 2)   # [B, C, C]
 
-        # ---------- 锚点项：改用 cosine 距离 ----------
+        # Anchor term: use cosine distance
         if self.lambda_anchor > 0 and self.anchors is not None:
             # self.anchors: [C, feat_dim]
             A = self.anchors                                   # [C, D]
-            A_norm = F.normalize(A, p=2, dim=1)                # 单位向量
-            # cosine 距离矩阵: 1 - cos(x,y)
+            A_norm = F.normalize(A, p=2, dim=1)                # unit vectors
+            # cosine distance matrix: 1 - cos(x,y)
             cosine_dist = 1.0 - torch.matmul(A_norm, A_norm.t())  # [C, C]
-            # 扩展到 batch
+            # Expand to batch
             anchor_cost_term = self.lambda_anchor * cosine_dist.unsqueeze(0).expand(batch_size, -1, -1)
         else:
             anchor_cost_term = 0.0
@@ -688,44 +682,44 @@ class AnchorDistillationLoss(nn.Module):       #原版本AD
 
     def earth_movers_distance(self, cost_matrix, transport_matrix):
         """
-        计算Earth Mover's Distance (Wasserstein Distance)。
-        此函数被重构以直接接收成本矩阵，避免重复计算。
+        Compute Earth Mover's Distance (Wasserstein Distance).
+        Refactored to directly receive cost matrix, avoiding redundant computation.
 
         Args:
-            cost_matrix (torch.Tensor): 成本矩阵 [batch_size, num_classes, num_classes]
-            transport_matrix (torch.Tensor): 最优传输矩阵 [batch_size, num_classes, num_classes]
+            cost_matrix (torch.Tensor): Cost matrix [batch_size, num_classes, num_classes]
+            transport_matrix (torch.Tensor): Optimal transport matrix [batch_size, num_classes, num_classes]
             
         Returns:
-            emd_loss (torch.Tensor): EMD损失的均值
+            emd_loss (torch.Tensor): Mean EMD loss
         """
-        # EMD = sum(T_ij * C_ij)，其中T是传输矩阵，C是成本矩阵
+        # EMD = sum(T_ij * C_ij), where T is transport matrix and C is cost matrix
         emd = torch.sum(transport_matrix * cost_matrix, dim=[1, 2])
         
         return torch.mean(emd)
 
     def forward(self):
         """
-        计算基于Sinkhorn-Knopp软对齐的蒸馏损失。
-        流程已根据修改意见简化和明确。
+        Compute distillation loss based on Sinkhorn-Knopp soft alignment.
+        Simplified and clarified per revision notes.
         
         Returns:
-            loss (torch.Tensor): 计算得到的最终蒸馏损失
+            loss (torch.Tensor): Final distillation loss
         """
-        # 1. 根据公式清晰定义学生和教师模型的概率分布 PS_τ 和 PT_τ
-        # PS_τ(i, j) = exp(S_ij/τ) / Σ_k exp(S_ik/τ)
+        # 1. Define student and teacher probability distributions PS_tau and PT_tau per formula
+        # PS_tau(i, j) = exp(S_ij/tau) / sum_k exp(S_ik/tau)
         student_probs = F.softmax(self.student_outputs / self.temperature, dim=1)
         teacher_probs = F.softmax(self.teacher_outputs / self.temperature, dim=1)
         
-        # 2. 将锚点信息明确加入到蒸馏的成本矩阵中
-        # C_total = ||PS_τ(i) - PT_τ(j)||_2^2 + λ * ||A'(i) - A'(j)||_2^2
+        # 2. Incorporate anchor info into distillation cost matrix
+        # C_total = ||PS_tau(i) - PT_tau(j)||_2^2 + lambda * ||A'(i) - A'(j)||_2^2
         cost_matrix = self.compute_cost_matrix(student_probs, teacher_probs)
         
-        # 3. 明确输入到 Sinkhorn-Knopp 算法的矩阵为 exp(-C_total)
-        #    我们的 sinkhorn_knopp 函数接收 C_total，并在内部计算 K = exp(-C_total / ε)
+        # 3. Input to Sinkhorn-Knopp is exp(-C_total)
+        #    Our sinkhorn_knopp receives C_total and internally computes K = exp(-C_total / eps)
         # T = Sinkhorn-Knopp(C_total)
         transport_matrix = self.sinkhorn_knopp(cost_matrix)
         
-        # 4. 计算Earth Mover's Distance作为最终的蒸馏损失
+        # 4. Compute Earth Mover's Distance as final distillation loss
         emd_loss = self.earth_movers_distance(cost_matrix, transport_matrix)
         
         return emd_loss'''
@@ -736,15 +730,13 @@ class LocalUpdate(object):
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
         self.selected_clients = []
-        # self.ldr_train = DataLoader(DatasetSplit(dataset, idxs), batch_size=self.args.local_bs, shuffle=True)#读取数据集
+        # self.ldr_train = DataLoader(DatasetSplit(dataset, idxs), batch_size=self.args.local_bs, shuffle=True)  # Load dataset
         self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
         self.pretrain = pretrain
 
     def train(self, net, lr, idx=-1, local_eps=None):
         net.train()
 
-        # train and update
-        
         # For ablation study
         optimizer = torch.optim.SGD(net.parameters(), lr=lr,
                                     momentum=self.args.momentum,
@@ -773,7 +765,7 @@ class LocalUpdate(object):
 
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
     
-#fedprox
+# FedProx
 
 class LocalUpdateFedProx(object):
     def __init__(self, args, dataset=None, idxs=None, pretrain=False, task = 0):
@@ -806,7 +798,7 @@ class LocalUpdateFedProx(object):
 
                 loss = self.loss_func(logits, labels)
                 
-                # for fedprox
+                # FedProx regularization
                 fed_prox_reg = 0.0
                 for l_param, g_param in zip(net.parameters(), g_net.parameters()):
                     fed_prox_reg += (0.1 / 2 * torch.norm((l_param - g_param)) ** 2)
@@ -822,8 +814,7 @@ class LocalUpdateFedProx(object):
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss) 
     
 
-
-#fedknow
+# FedKnow
 class LocalUpdateFedKnow(object):
     def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
         self.args = args
@@ -841,8 +832,8 @@ class LocalUpdateFedKnow(object):
         # Gradient integration parameters
         self.epsilon = 1e-5  # Small constant for numerical stability
         solvers.options['show_progress'] = False  # Disable QP solver output
-        self.task_features = []  # 存储每个任务的特征（平均梯度）
-        self.task_weights = []   # 存储每个任务的权重知识
+        self.task_features = []  # Store per-task features (avg gradients)
+        self.task_weights = []   # Store per-task weight knowledge
 
     '''def _extract_knowledge(self, net):
         """Extract top (1-rho)% important weights as task knowledge"""
@@ -855,15 +846,17 @@ class LocalUpdateFedKnow(object):
                 weights.append((param.data * mask, mask))
         return weights'''
     def _extract_knowledge(self, net, images):
-        """提取知识并计算任务特征"""
-        # 获取当前任务的平均梯度作为特征
+        """Extract knowledge and compute task features."""
+    def _extract_knowledge(self, net, images):
+        """Extract knowledge and compute task features."""
+        # Use current task avg gradient as feature
         net.zero_grad()
         outputs = net(images)
         loss = self.loss_func(outputs, outputs.softmax(dim=1).argmax(dim=1))
         loss.backward()
         task_feature = torch.cat([p.grad.flatten().abs().mean().unsqueeze(0) for p in net.parameters()])
 
-        # 原有权重提取逻辑
+        # Original weight extraction logic
         weights = []
         for param in net.parameters():
             if len(param.shape) > 1:  # Weight matrices only
@@ -926,21 +919,21 @@ class LocalUpdateFedKnow(object):
         except:
             return current_grad  # Fallback to original gradient'''
     def _integrate_gradients(self, current_grad, restored_grads):
-        """修正后的梯度集成方法"""
+        """Fixed gradient integration method."""
         if not restored_grads:
             return current_grad
 
-        # 1. 构建约束矩阵（论文公式3）
+        # 1. Build constraint matrix (paper Eq. 3)
         G = torch.stack(restored_grads).cpu().numpy()
         h = np.zeros(len(restored_grads))  # Gg' >= 0
 
-        # 2. 二次规划参数设置
+        # 2. QP parameter setup
         P = matrix(np.eye(len(current_grad)))
         q = matrix(-current_grad.cpu().numpy())
-        G = matrix(-G)  # 转换为 <= 0 约束
+        G = matrix(-G)  # Convert to <= 0 constraint
         h = matrix(h)
 
-        # 3. 求解QP问题
+        # 3. Solve QP
         try:
             sol = solvers.qp(P, q, G, h)
             v = np.array(sol['x']).flatten()
@@ -1003,7 +996,7 @@ class LocalUpdateFedKnow(object):
 
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
     
-#target
+# Target
 class LocalUpdateTARGET(object):
     def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False, synthetic_data=None):
         self.args = args
@@ -1011,13 +1004,13 @@ class LocalUpdateTARGET(object):
         self.selected_clients = []
         self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
         self.pretrain = pretrain
-        self.synthetic_data = synthetic_data  # 添加合成数据
+        self.synthetic_data = synthetic_data  # Add synthetic data
 
     def train(self, net, teacher_model, lr, idx=-1, local_eps=None):
         net.train()
-        teacher_model.eval()  # 固定教师模型
+        teacher_model.eval()  # Freeze teacher model
 
-        # 组合优化器
+        # Combined optimizer
         optimizer = torch.optim.SGD(net.parameters(), lr=lr,
                                    momentum=self.args.momentum,
                                    weight_decay=self.args.wd)
@@ -1029,47 +1022,47 @@ class LocalUpdateTARGET(object):
             batch_loss = []
             
             if self.synthetic_data is not None:
-                # 同时遍历真实数据和合成数据
+                # Iterate real and synthetic data together
                 for (real_images, real_labels), (synth_images, _) in zip(self.ldr_train, self.synthetic_data):
-                    # 当前任务数据
+                    # Current task data
                     real_images, real_labels = real_images.to(self.args.device), real_labels.to(self.args.device)
                     
-                    # 合成数据（旧任务）
+                    # Synthetic data (old tasks)
                     synth_images = synth_images.to(self.args.device)
                     
-                    # 前向传播
+                    # Forward pass
                     real_logits = net(real_images)
                     synth_logits = net(synth_images)
                     
-                    # 教师模型输出
+                    # Teacher model output
                     with torch.no_grad():
                         teacher_logits = teacher_model(synth_images)
                     
-                    # 计算损失
-                    ce_loss = self.loss_func(real_logits, real_labels)  # 当前任务损失
+                    # Compute loss
+                    ce_loss = self.loss_func(real_logits, real_labels)  # Current task loss
                     kl_loss = nn.KLDivLoss()(F.log_softmax(synth_logits, dim=1),
-                                           F.softmax(teacher_logits, dim=1))  # 旧任务蒸馏损失
+                                           F.softmax(teacher_logits, dim=1))  # Old task distillation loss
                     
-                    total_loss = ce_loss + 0.1 * kl_loss  # 组合损失
+                    total_loss = ce_loss + 0.1 * kl_loss  # Combined loss
                     
-                    # 反向传播
+                    # Backward pass
                     optimizer.zero_grad()
                     total_loss.backward()
                     optimizer.step()
 
                     batch_loss.append(total_loss.item())
             else:
-                # 仅使用真实数据训练
+                # Train with real data only
                 for real_images, real_labels in self.ldr_train:
                     real_images, real_labels = real_images.to(self.args.device), real_labels.to(self.args.device)
                     
-                    # 前向传播
+                    # Forward pass
                     real_logits = net(real_images)
                     
-                    # 计算损失
-                    ce_loss = self.loss_func(real_logits, real_labels)  # 当前任务损失
+                    # Compute loss
+                    ce_loss = self.loss_func(real_logits, real_labels)  # Current task loss
                     
-                    # 反向传播
+                    # Backward pass
                     optimizer.zero_grad()
                     ce_loss.backward()
                     optimizer.step()
@@ -1089,14 +1082,14 @@ class LocalUpdateReFed(object):
         self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
         self.pretrain = pretrain
 
-        # 初始化个性化信息模型 (PIM)
-        self.pim = copy.deepcopy(args.global_model)  # 全局模型初始化 PIM
-        self.cached_samples = []  # 缓存的重要样本
+        # Initialize personalized info model (PIM)
+        self.pim = copy.deepcopy(args.global_model)  # Init PIM from global model
+        self.cached_samples = []  # Cached important samples
 
     def train(self, net, lr, idx=-1, local_eps=None):
         net.train()
 
-        # 定义优化器
+        # Define optimizer
         optimizer = torch.optim.SGD(net.parameters(), lr=lr,
                                     momentum=self.args.momentum,
                                     weight_decay=self.args.wd)
@@ -1116,11 +1109,11 @@ class LocalUpdateReFed(object):
             for batch_idx, (images, labels) in enumerate(self.ldr_train):
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
 
-                # 前向传播
+                # Forward pass
                 logits = net(images)
                 loss = self.loss_func(logits, labels)
 
-                # 反向传播更新本地模型
+                # Backward pass to update local model
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -1129,13 +1122,13 @@ class LocalUpdateReFed(object):
 
             epoch_loss.append(sum(batch_loss) / len(batch_loss))
 
-        # 在本地训练结束后，更新 PIM 并计算样本重要性
+        # After local training, update PIM and compute sample importance
         self.update_pim_and_cache_samples(net)
 
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
     def update_pim_and_cache_samples(self, net):
-        # 更新个性化信息模型 (PIM)
+        # Update personalized info model (PIM)
         self.pim.train()
         pim_optimizer = torch.optim.SGD(self.pim.parameters(), lr=self.args.lr_pim,
                                          momentum=self.args.momentum,
@@ -1143,42 +1136,42 @@ class LocalUpdateReFed(object):
 
         importance_scores = {}
 
-        # 使用本地数据更新 PIM，并记录样本梯度范数
+        # Update PIM with local data and record sample grad norms
         for batch_idx, (images, labels) in enumerate(self.ldr_train):
             images, labels = images.to(self.args.device), labels.to(self.args.device)
 
-            # 前向传播
+            # Forward pass
             logits = self.pim(images)
             loss = self.loss_func(logits, labels)
 
-            # 反向传播更新 PIM
+            # Backward pass to update PIM
             pim_optimizer.zero_grad()
             loss.backward()
             pim_optimizer.step()
 
-            # 计算样本梯度范数作为重要性分数
+            # Compute sample grad norm as importance score
             for i in range(len(images)):
                 sample_grad_norm = torch.norm(self.pim.fc.weight.grad[i]).item()
                 if (images[i], labels[i]) not in importance_scores:
                     importance_scores[(images[i], labels[i])] = 0
                 importance_scores[(images[i], labels[i])] += sample_grad_norm
 
-        # 根据重要性分数缓存样本
+        # Cache samples by importance score
         sorted_samples = sorted(importance_scores.items(), key=lambda x: x[1], reverse=True)
         max_cache_size = self.args.max_cache_size
         self.cached_samples = [sample for sample, _ in sorted_samples[:max_cache_size]]
 
-        # 将缓存的样本与新任务数据合并，用于下一次训练
+        # Merge cached samples with new task data for next training
         self.ldr_train = combine_cached_and_new_data(self.cached_samples, self.ldr_train)
 
 def combine_cached_and_new_data(cached_samples, new_data_loader):
-    """将缓存样本与新任务数据合并"""
+    """Merge cached samples with new task data"""
     cached_dataset = CachedDataset(cached_samples)
     combined_dataset = ConcatDataset([cached_dataset, new_data_loader.dataset])
     return DataLoader(combined_dataset, batch_size=new_data_loader.batch_size, shuffle=True)
 
 class CachedDataset(torch.utils.data.Dataset):
-    """缓存样本的自定义数据集"""
+    """Custom dataset for cached samples"""
     def __init__(self, samples):
         self.samples = samples
 
@@ -1194,17 +1187,17 @@ class LocalUpdateEWC(object):
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
         self.selected_clients = []
-        # 加载数据集
+        # Load dataset
         self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
         self.pretrain = pretrain
         
-        # EWC 相关初始化
-        self.fisher = None  # 存储 Fisher 信息矩阵
-        self.old_params = None  # 存储之前的模型参数
+        # EWC init
+        self.fisher = None  # Store Fisher information matrix
+        self.old_params = None  # Store previous model params
 
     def compute_fisher(self, net):
         """
-        计算当前任务的 Fisher 信息矩阵。
+        Compute Fisher information matrix for the current task.
         """
         fisher = {}
         for name, param in net.named_parameters():
@@ -1220,13 +1213,13 @@ class LocalUpdateEWC(object):
             net.zero_grad()
             loss.backward()
             
-            # 更新 Fisher 信息矩阵
+            # Update Fisher info matrix
             for name, param in net.named_parameters():
                 if param.grad is not None:
                     fisher[name] += param.grad.data.pow(2) * len(labels)
             total_samples += len(labels)
         
-        # 归一化 Fisher 信息矩阵
+        # Normalize Fisher info matrix
         for name in fisher:
             fisher[name] /= total_samples
         
@@ -1235,14 +1228,14 @@ class LocalUpdateEWC(object):
     def train(self, net, lr, idx=-1, local_eps=None):
         net.train()
 
-        # 初始化优化器
+        # Init optimizer
         optimizer = torch.optim.SGD(net.parameters(), lr=lr,
                                     momentum=self.args.momentum,
                                     weight_decay=self.args.wd)
 
         epoch_loss = []
         
-        # 如果未指定本地训练轮数，则根据是否预训练设置默认值
+        # Set default local epochs if not specified
         if local_eps is None:
             if self.pretrain:
                 local_eps = self.args.local_ep_pretrain
@@ -1254,21 +1247,21 @@ class LocalUpdateEWC(object):
             for batch_idx, (images, labels) in enumerate(self.ldr_train):
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
                 
-                # 前向传播
+                # Forward pass
                 logits = net(images)
                 ce_loss = self.loss_func(logits, labels)
                 
-                # EWC 正则化项
+                # EWC regularization
                 ewc_loss = 0
                 if self.fisher is not None and self.old_params is not None:
                     for name, param in net.named_parameters():
                         if name in self.fisher:
                             ewc_loss += torch.sum(self.fisher[name] * (param - self.old_params[name]).pow(2))
                 
-                # 总损失 = CE 损失 + EWC 损失
+                # Total loss = CE + EWC
                 total_loss = ce_loss +  ewc_loss
                 
-                # 反向传播和优化
+                # Backward pass and optimize
                 optimizer.zero_grad()
                 total_loss.backward()
                 optimizer.step()
@@ -1277,12 +1270,12 @@ class LocalUpdateEWC(object):
 
             epoch_loss.append(sum(batch_loss)/len(batch_loss))
 
-        # 返回更新后的模型参数和平均损失
+        # Return updated model params and avg loss
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
     def update_old_params(self, net):
         """
-        保存当前模型参数作为旧参数。
+        Save current model parameters as old parameters.
         """
         self.old_params = {name: param.clone().detach() for name, param in net.named_parameters()}
 
@@ -1457,18 +1450,18 @@ class CDAPGenerator(nn.Module):
         
     def forward(self, features, task_id):
         self.ensure_initialized(features.size(-1), features.device)
-        # 样本级提示
+        # Sample-level prompts
         x = self.ln(features)
         sample_prompts = self.mlp(x)  # [batch, prompt_dim]
         
-        # 应用CCDA层
+        # Apply CCDA layer
         adapted_prompts = self.ccda(sample_prompts)
         
-        # 预测LT参数
+        # Predict LT parameters
         affine_params = self.affine_predictor(features)  # [batch, prompt_dim*2]
-        alpha, lambda_ = torch.chunk(affine_params, 2, dim=1)  # 各自 [batch, prompt_dim]
+        alpha, lambda_ = torch.chunk(affine_params, 2, dim=1)  # each [batch, prompt_dim]
         
-        # 应用LT变换
+        # Apply LT transformation
         final_prompts = alpha * adapted_prompts + lambda_
         
         return final_prompts  # [batch, prompt_dim]
@@ -1476,7 +1469,7 @@ class CDAPGenerator(nn.Module):
 
 
 class LocalUpdateRifFiL(object):
-    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False, prompt_dim=None):  # 添加 prompt_dim 参数
+    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False, prompt_dim=None):  # add prompt_dim parameter
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
         self.selected_clients = []
@@ -1484,44 +1477,44 @@ class LocalUpdateRifFiL(object):
         self.pretrain = pretrain
         
         # RefFiL modules
-        # 使用传入的 prompt_dim 或 args.prompt_dim
+        # Use provided prompt_dim or fallback to args.prompt_dim
         self.prompt_dim = prompt_dim if prompt_dim is not None else args.prompt_dim
         print(f"[Client] Using prompt_dim={self.prompt_dim}")
         
-        self.cdap = CDAPGenerator(prompt_dim=self.prompt_dim)  # 根据真实特征维度动态初始化
+        self.cdap = CDAPGenerator(prompt_dim=self.prompt_dim)  # dynamically initialize based on actual feature dimension
         self.current_global_prompts = None
         self.temperature = nn.Parameter(torch.tensor(0.9))
         self.prompt_cache = {}
         self.current_task = task
-        self.current_labels = []  # 添加标签缓存
+        self.current_labels = []  # add label cache
         
     def compute_gpl_loss(self, logits_global, labels):
         return F.cross_entropy(logits_global, labels)
     
     def compute_dpcl_loss(self, local_prompts, global_prototypes, labels):
         """
-        重构的领域特定提示对比学习
-        关键改进：使用类别原型而非所有全局提示
+        Reconstructed domain-specific prompt contrastive learning.
+        Key improvement: use class prototypes instead of all global prompts.
         """
-        # 1. 维度校验
-        assert local_prompts.dim() == 2, f"需要2D张量，实际维度: {local_prompts.dim()}"
-        assert global_prototypes.dim() == 2, f"需要2D张量，实际维度: {global_prototypes.dim()}"
+        # 1. Dimension check
+        assert local_prompts.dim() == 2, f"Expected 2D tensor, got dim: {local_prompts.dim()}"
+        assert global_prototypes.dim() == 2, f"Expected 2D tensor, got dim: {global_prototypes.dim()}"
         assert local_prompts.size(1) == global_prototypes.size(1), \
-            f"提示维度不匹配: 本地{local_prompts.size(1)} vs 全局{global_prototypes.size(1)}"
+            f"Prompt dimension mismatch: local {local_prompts.size(1)} vs global {global_prototypes.size(1)}"
         
-        # 2. 提取对应类别的全局原型
+        # 2. Extract class-specific global prototypes
         target_prototypes = global_prototypes[labels]  # [batch, prompt_dim]
         
-        # 3. 计算每个本地提示与其类别原型的相似度
+        # 3. Compute similarity between local prompts and class prototypes
         similarities = F.cosine_similarity(
             local_prompts,
             target_prototypes,
             dim=1
         )  # [batch]
         
-        # 4. 温度缩放和损失计算
+        # 4. Temperature scaling and loss computation
         logits = similarities / self.temperature.clamp(min=0.3)
-        return -logits.mean()  # 最大化相似度
+        return -logits.mean()  # maximize similarity
 
 
     def train(self, net, lr, idx=-1, local_eps=None):
@@ -1529,7 +1522,7 @@ class LocalUpdateRifFiL(object):
         net.train()
         self.cdap.train()
 
-        # 用真实特征维度初始化CDAP，避免LayerNorm维度硬编码错误
+        # Initialize CDAP with actual feature dim to avoid hardcoded LayerNorm size
         init_images, _ = next(iter(self.ldr_train))
         init_images = init_images.to(self.args.device)
         with torch.no_grad():
@@ -1550,43 +1543,43 @@ class LocalUpdateRifFiL(object):
             batch_loss = []
             for images, labels in self.ldr_train:
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
-                self.current_labels = labels  # 缓存当前批次标签
+                self.current_labels = labels  # cache current batch labels
                 
-                # 特征提取
+                # Feature extraction
                 features = net.extract_features(images)
                 logits_local = net.only_liner(features)
                 
-                # 生成本地提示
+                # Generate local prompts
                 task_ids = torch.full((len(images),), self.current_task, 
                                     device=self.args.device)
                 local_prompts = self.cdap(features.detach(), task_ids)
                 
-                # 全局提示处理
+                # Global prompt processing
                 with torch.no_grad():
-                    # 关键修改1: 创建全局类别原型矩阵
+                    # Build global class-prototype matrix
                     global_prototypes = torch.zeros(
                         self.args.num_classes, 
                         self.prompt_dim,
                         device=self.args.device
                     )
                     
-                    # 聚合每个类别的平均提示
+                    # Aggregate per-class mean prompts
                     for cls in range(self.args.num_classes):
                         if cls in self.current_global_prompts:
                             cls_prompts = self.current_global_prompts[cls]
                             global_prototypes[cls] = cls_prompts.mean(dim=0)
                         else:
-                            # 回退机制：随机初始化
+                            # Fallback: random init
                             global_prototypes[cls] = torch.randn(
                                 self.prompt_dim, 
                                 device=self.args.device
                             )
                     
-                    # 关键修改2: 保留原始全局提示用于GPL损失
+                    # Keep raw global prompts for GPL loss
                     all_prompt_features = []
                     all_prompt_labels = []
                     
-                    # 收集全局提示
+                    # Collect global prompts
                     for label in labels.unique():
                         label_int = label.item()
                         if label_int in self.current_global_prompts:
@@ -1596,7 +1589,7 @@ class LocalUpdateRifFiL(object):
                             all_prompt_features.append(class_prompts)
                             all_prompt_labels.append(label.repeat(num_prompts))
                     
-                    # 处理没有全局提示的情况
+                    # Handle missing global prompts
                     if all_prompt_features:
                         global_prompts = torch.cat(all_prompt_features)
                         prompt_labels = torch.cat(all_prompt_labels)
@@ -1611,11 +1604,11 @@ class LocalUpdateRifFiL(object):
                             device=self.args.device
                         )
                     
-                    # 获取真实样本特征（用于GPL损失）
+                    # Get real sample features for GPL loss
                     real_global_features = []
                     valid_global_labels = []
                     
-                    # 关键优化：向量化操作
+                    # Vectorized ops for efficiency
                     unique_labels = prompt_labels.unique()
                     label_mask_dict = {}
                     
@@ -1637,37 +1630,37 @@ class LocalUpdateRifFiL(object):
                             real_global_features.append(features[rand_idx])
                             valid_global_labels.append(labels[rand_idx][0])
                     
-                    # 转换结果
+                    # Convert results
                     real_global_features = torch.cat(real_global_features)
                     valid_global_labels = torch.tensor(valid_global_labels, 
                                                     device=self.args.device,
                                                     dtype=torch.long)
                     
-                    # 计算全局logits
+                    # Compute global logits
                     logits_global = net.only_liner(real_global_features)
                 
-                # 损失计算
+                # Loss computation
                 ce_loss = self.loss_func(logits_local, labels)
                 gpl_loss = self.compute_gpl_loss(logits_global, valid_global_labels)
                 
-                # DPCL损失计算 - 关键修改3: 使用类别原型
+                # DPCL loss with class prototypes (key fix #3)
                 if len(local_prompts) == 0:
                     dpcl_loss = torch.tensor(0.0, device=self.args.device)
                 else:
-                    # 添加维度校验
+                    # Sanity-check dimensions
                     assert local_prompts.size(-1) == global_prototypes.size(-1), \
-                        f"提示维度不匹配: 本地{local_prompts.size(-1)} vs 全局原型{global_prototypes.size(-1)}"
+                        f"Prompt dimension mismatch: local {local_prompts.size(-1)} vs global prototype {global_prototypes.size(-1)}"
                     
-                    # 使用重构后的DPCL损失函数
+                    # Use refactored DPCL loss
                     dpcl_loss = self.compute_dpcl_loss(
                         local_prompts, 
-                        global_prototypes,  # 使用类别原型而非所有提示
+                        global_prototypes,  # use class prototypes instead of all prompts
                         labels
                     )
                 
                 total_loss = ce_loss + 0.5*gpl_loss + 0.3*dpcl_loss
                 
-                # 反向传播
+                # Backward pass
                 optimizer.zero_grad()
                 total_loss.backward()
                 optimizer.step()
@@ -1694,7 +1687,7 @@ class LocalUpdateRifFiL(object):
     def set_current_task(self, task_id):
         self.current_task = task_id
     def update_temperature(self, current_task):
-    # 论文中的温度衰减公式
+    # Temperature decay schedule (from paper)
         tau_min = 0.3
         gamma = 0.1
         beta = 0.05

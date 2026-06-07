@@ -5,18 +5,17 @@ import torch
 import torchvision
 import torchvision.transforms as transforms
 
-# 假设这两个函数已经定义
 from data_util import split_data, save_file
 
 num_client = 20
-num_task = 10  # 可以设置为 5 或 10
+num_task = 10  # Can be set to 5 or 10
 num_classes = 100
 alpha = 0.5
 np.random.seed(2266)
 
-# 数据集存储地址
+# Dataset storage path
 datasetroot_dir = "/root/cifar100"
-# 生成数据集存储地址
+# Output dataset path
 basedir = "./cifar100-incremental-{}-task-{}".format(alpha, num_task)
 if not os.path.exists(basedir):
     os.mkdir(basedir)
@@ -53,26 +52,26 @@ total_label.extend(train_dataset.targets.cpu().detach().numpy())
 total_label.extend(test_dataset.targets.cpu().detach().numpy())
 total_label = np.array(total_label)
 
-# 每个客户端的数据和标签
+# Per-client data and labels
 image_per_client = [[] for _ in range(num_client)]
 label_per_client = [[] for _ in range(num_client)]
 statistic = [[] for _ in range(num_client)]
 
-# 记录索引的字典 key = client编号  value = []索引list
+# Index mapping: client_id -> list of indices
 dataidx_map = {}
-# 每一个数据的索引
+# All sample indices
 idxs = np.array(range(len(total_label)))
-# 每一个类数据的索引
+# Per-class sample indices
 idx_for_each_class = []
 for i in range(num_classes):
     idx_for_each_class.append(idxs[total_label == i])
 
-# 使用狄利克雷分布分配数据给每个客户端
+# Assign data to each client using Dirichlet distribution
 dirichlet_dist = np.random.dirichlet([alpha] * num_client, num_classes)
 for i in range(num_classes):
     num_images = len(idx_for_each_class[i])
     client_distribution = np.round(dirichlet_dist[i] * num_images).astype(int)
-    # 处理可能的舍入误差
+    # Handle possible rounding errors
     client_distribution[-1] += num_images - client_distribution.sum()
     idx = 0
     for client in range(num_client):
@@ -83,7 +82,7 @@ for i in range(num_classes):
             dataidx_map[client] = np.append(dataidx_map[client], idx_for_each_class[i][idx:idx + num_sample], axis=0)
         idx += num_sample
 
-# 遍历每个客户端,得到每个客户端的索引
+# Collect per-client indices
 df = pd.DataFrame(columns=[str(i) for i in range(100)])
 for client in range(num_client):
     idxs = dataidx_map[client]
@@ -113,7 +112,7 @@ col.append('client')
 col.append('task')
 df = pd.DataFrame(columns=col)
 
-# 类增量模式
+# Class-incremental mode
 classes_per_task = num_classes // num_task
 for client_id in range(num_client):
     client_images = image_per_client[client_id]
@@ -153,7 +152,7 @@ for client_id in range(num_client):
         print("-" * 50)
         print("=" * 50 + "\n\n")
 
-    # 保存数据
+    # Save split data
     train_data, test_data = split_data(X, Y)
 
     if not os.path.exists(basedir + "/train"):

@@ -96,7 +96,7 @@ def main(dataset_dir, num_clients, num_tasks, batch_size=50):
                 print(f"\nLoading Client {client_id}, Task {task_id}...")
                 train_loader = load_train_data(dataset_dir, client_id, task_id, batch_size=batch_size)
 
-                # 可选：打印一些样本信息
+                # Print sample info
                 first_batch = next(iter(train_loader))
                 print(f"Batch size: {batch_size}")
                 print(f"Number of batches: {len(train_loader)}")
@@ -108,14 +108,14 @@ def main(dataset_dir, num_clients, num_tasks, batch_size=50):
                 
 
 if __name__ == "__main__":
-    # 数据集路径（请替换为你的实际路径）
+    # Dataset path (update to your actual path)
     dataset_dir = "/root/fedacd/dataset/cifar100-incremental-0.1-task-10"
 
     num_clients = 20
     num_tasks = 10
 
-    # 每个 batch 的大小
+    # Batch size
     batch_size = 32
 
-    # 启动主函数
+    # Run
     main(dataset_dir, num_clients, num_tasks, batch_size)

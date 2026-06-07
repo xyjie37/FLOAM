@@ -109,7 +109,7 @@ def noniid(dataset, num_users, shard_per_user, server_data_ratio, rand_set_all=[
         num_leftover = len(x) % shard_per_class
         leftover = x[-num_leftover:] if num_leftover > 0 else []
         x = np.array(x[:-num_leftover]) if num_leftover > 0 else np.array(x)
-        x = x.reshape((shard_per_class, -1))#把数据按行分成一块一块的
+        x = x.reshape((shard_per_class, -1))
         x = list(x)
 
         for i, idx in enumerate(leftover):

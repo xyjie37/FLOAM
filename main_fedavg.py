@@ -81,11 +81,11 @@ if __name__ == '__main__':
         idxs_users = np.random.choice(range(args.num_users), m, replace=False)
         # print("Round {}, lr: {:.6f}, {}".format(iter, lr, idxs_users))
         
-        task=(iter//10)%task_num#每过10个轮次进行任务切换
+        task=(iter//10)%task_num  # Task switch every 10 rounds
         print('Current task: ', task)
         # Local Updates
         for idx in idxs_users:
-            #数据集名字，序号
+            # Dataset name, index
             local = LocalUpdate(args=args, dataset=dataset_path, idxs=idx, task = task)
             net_local = copy.deepcopy(net_local_list[idx])
             w_local, loss = local.train(net=net_local.to(args.device), lr=lr)

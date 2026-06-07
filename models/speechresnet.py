@@ -30,7 +30,7 @@ class BasicBlock(nn.Module):
         return out
 
 class SpeechResNet18(nn.Module):
-    def __init__(self, num_classes=30):  # Speech Commands 有 30 个类别
+    def __init__(self, num_classes=30):  # Speech Commands has 30 classes
         super(SpeechResNet18, self).__init__()
         self.in_planes = 64
 
@@ -41,7 +41,7 @@ class SpeechResNet18(nn.Module):
         self.layer2 = self._make_layer(BasicBlock, 128, 2, stride=2)
         self.layer3 = self._make_layer(BasicBlock, 256, 2, stride=2)
         self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2)
-        # Speech Commands 尺寸为 32x32，经过网络后特征图尺寸为 4x4，使用 4x4 的平均池化
+        # Speech Commands input is 32x32, feature map becomes 4x4 after network, use 4x4 avg pool
         self.avgpool = nn.AvgPool2d(4)
         self.linear = nn.Linear(512, num_classes)
 

@@ -15,9 +15,9 @@ num_classes = 10  # CINIC-10 has 10 classes
 alpha = 0.1
 np.random.seed(2266)
 
-# 数据集存储地址（HF 快照：根目录下 data/*.parquet）
+# Dataset storage path (HF snapshot: data/*.parquet under root)
 datasetroot_dir = "/home/jxy/cinic10_hf"
-# 生成数据集存储地址
+# Output dataset path
 basedir = "./cinic10-dir-{}-task-{}".format(alpha, num_task)
 if not os.path.exists(basedir):
     os.mkdir(basedir)
@@ -42,7 +42,7 @@ class_to_idx = {
 }
 
 def _decode_hf_parquet_image(img_cell):
-    """HF parquet 中 image 列常为 dict: bytes + path，或已是 PIL。"""
+    """HF parquet image column is often dict: bytes + path, or already PIL."""
     if isinstance(img_cell, Image.Image):
         return img_cell.convert('RGB')
     if isinstance(img_cell, dict):
@@ -55,13 +55,13 @@ def _decode_hf_parquet_image(img_cell):
             if os.path.isfile(cand):
                 return Image.open(cand).convert('RGB')
             raise FileNotFoundError(
-                "parquet 中 image 无 bytes，且相对 path 在当前目录下找不到文件: %s" % rel
+                "parquet image has no bytes, and relative path not found in cwd: %s" % rel
             )
-    raise TypeError("无法解析 image 列类型: %s" % type(img_cell))
+    raise TypeError("Cannot parse image column type: %s" % type(img_cell))
 
 
 def load_cinic10(root, train=True, transform=None):
-    # HF 布局：data/train-*.parquet、data/validation-*.parquet（对应原 valid 目录）
+    # HF layout: data/train-*.parquet, data/validation-*.parquet (maps to original valid dir)
     split = 'train' if train else 'validation'
     data_dir = os.path.join(root, 'data')
     parquet_files = sorted(glob.glob(os.path.join(data_dir, '%s-*.parquet' % split)))
@@ -80,7 +80,7 @@ def load_cinic10(root, train=True, transform=None):
                 labels.append(int(lab))
         return np.array(images), np.array(labels)
 
-    # 旧版按类别子目录：train/ 与 valid/
+    # Legacy class-subfolder layout: train/ and valid/
     dataset_type = 'train' if train else 'valid'
     split_root = os.path.join(root, dataset_type)
     for class_name in os.listdir(split_root):
@@ -111,16 +111,16 @@ image_per_client = [[] for _ in range(num_client)]
 label_per_client = [[] for _ in range(num_client)]
 statistic = [[] for _ in range(num_client)]
 
-# 记录索引的字典 key = client编号  value = []索引list
+# Index mapping: client_id -> list of indices
 dataidx_map = {}
-# 每一个数据的索引
+# All sample indices
 idxs = np.array(range(len(total_label)))
-# 每一个类数据的索引
+# Per-class sample indices
 idx_for_each_class = []
 for i in range(num_classes):
     idx_for_each_class.append(idxs[total_label == i])
 
-# 对每类数据操作
+# Process each class
 for i in range(num_classes):
     num_images = len(idx_for_each_class[i])
     num_per_client = num_images / num_client
@@ -133,7 +133,7 @@ for i in range(num_classes):
             dataidx_map[client] = np.append(dataidx_map[client], idx_for_each_class[i][idx:idx + num_sample], axis=0)
         idx += num_sample
 
-# 遍历每个客户端,得到每个客户端的索引
+# Collect per-client indices
 df = pd.DataFrame(columns=[str(i) for i in range(10)])
 for client in range(num_client):
     idxs = dataidx_map[client]
@@ -163,7 +163,7 @@ col.append('client')
 col.append('task')
 df = pd.DataFrame(columns=col)
 
-# 将每类数据按照迪利克雷分布分配给每个任务
+# Split each class across tasks via Dirichlet
 for client_id in range(num_client):
     client_images = image_per_client[client_id]
     client_dataset_label = label_per_client[client_id]
@@ -171,7 +171,7 @@ for client_id in range(num_client):
     Y = [[] for _ in range(num_task)]
     client_idx_map = {}
 
-    # 类增量模式
+    # Class-incremental mode
     classes_per_task = num_classes // num_task
     for task in range(num_task):
         start_class = 0
@@ -179,7 +179,7 @@ for client_id in range(num_client):
         task_classes = list(range(start_class, end_class + 1))
 
         min_size = 0
-        max_attempts = 1000  # 最大尝试次数
+        max_attempts = 1000  # Max retry attempts
         attempt = 0
 
         idx_batch = [[] for _ in range(num_task)]
@@ -187,8 +187,8 @@ for client_id in range(num_client):
             idx_k = np.where(client_dataset_label == k)[0]
             np.random.shuffle(idx_k)
             proportions = np.random.dirichlet(np.repeat(alpha, num_task))
-            proportions = np.clip(proportions, a_min=0.05, a_max=None)  # 确保最小比例
-            proportions /= proportions.sum()  # 归一化
+            proportions = np.clip(proportions, a_min=0.05, a_max=None)  # Enforce minimum proportion
+            proportions /= proportions.sum()  # Renormalize
             proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
             idx_batch = [idx_j + idx.tolist() for idx_j, idx in zip(idx_batch, np.split(idx_k, proportions))]
             min_size = min([len(idx_j) for idx_j in idx_batch])
@@ -215,7 +215,7 @@ for client_id in range(num_client):
         print("-" * 50)
         print("=" * 50 + "\n\n")
 
-    # 保存数据
+    # Save split data
     train_data, test_data = split_data(X, Y)
 
     if not os.path.exists(basedir + "/train"):
