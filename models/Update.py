@@ -18,7 +18,11 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 from collections import defaultdict
 import torch.optim as optim
 from scipy.stats import wasserstein_distance
-from cvxopt import matrix, solvers
+try:
+    from cvxopt import matrix, solvers
+except ImportError:
+    matrix = None
+    solvers = None
 from collections import Counter
 import torchvision.transforms.functional as TF
 from collections import OrderedDict
@@ -817,6 +821,10 @@ class LocalUpdateFedProx(object):
 # FedKnow
 class LocalUpdateFedKnow(object):
     def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
+        if solvers is None:
+            raise ImportError(
+                "LocalUpdateFedKnow requires the optional dependency 'cvxopt'."
+            )
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
         self.selected_clients = []

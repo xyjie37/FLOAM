@@ -3,7 +3,10 @@
 # Python version: 3.6
 
 import copy
+import json
+import os
 import pickle
+import random
 import numpy as np
 import pandas as pd
 import torch
@@ -13,7 +16,6 @@ from utils.options import args_parser
 from utils.train_utils import get_data, get_model
 from models.Update import LocalUpdate
 from models.test import test_img, test_img_local, test_img_local_all, compute_smi_tdi_for_task
-import os
 
 import pdb
 from collections import defaultdict
@@ -23,26 +25,54 @@ if __name__ == '__main__':
     # parse args
     args = args_parser()
     dataset_path = args.datasetpath
-    # Seed
-    # torch.manual_seed(args.seed)#seed=1
-    # torch.cuda.manual_seed(args.seed)
-    # torch.backends.cudnn.deterministic = True
-    # np.random.seed(args.seed)
-    task_num = args.task_num
     if args.gpu != '-1':
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+
+    # Reproducibility: seed each random source used by the training pipeline.
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    client_rng = np.random.default_rng(args.seed)
+    task_num = args.task_num
     args.device = torch.device('cuda'if torch.cuda.is_available() else 'cpu')
 
     base_dir = './save/{}/{}_num{}_C{}_le{}_bs{}_round{}_m{}_lr{}/{}/'.format(
         dataset_path, args.model, args.num_users, args.frac, args.local_ep, args.local_bs, args.epochs, args.momentum, args.lr, args.results_save)
     algo_dir = 'fedavg'
+    run_dir = os.path.join(base_dir, algo_dir, 'seed_{}'.format(args.seed))
     save_folder = './results/fedavg'
     
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
     
-    if not os.path.exists(os.path.join(base_dir, algo_dir)):
-        os.makedirs(os.path.join(base_dir, algo_dir), exist_ok=True)
+    os.makedirs(run_dir, exist_ok=True)
+
+    # Freeze the complete client schedule before training starts.
+    clients_per_round = max(int(args.frac * args.num_users), 1)
+    client_schedule = []
+    for round_idx in range(args.epochs):
+        clients = client_rng.choice(
+            args.num_users, clients_per_round, replace=False).tolist()
+        client_schedule.append({
+            'round': round_idx,
+            'task': (round_idx // 10) % task_num,
+            'clients': clients,
+        })
+
+    schedule_path = os.path.join(run_dir, 'client_schedule.json')
+    with open(schedule_path, 'w', encoding='utf-8') as schedule_file:
+        json.dump(client_schedule, schedule_file, indent=2)
+
+    run_config = vars(args).copy()
+    run_config['device'] = str(args.device)
+    run_config['clients_per_round'] = clients_per_round
+    config_path = os.path.join(run_dir, 'run_config.json')
+    with open(config_path, 'w', encoding='utf-8') as config_file:
+        json.dump(run_config, config_file, indent=2, sort_keys=True)
 
     # build a global model
     net_glob = get_model(args)
@@ -58,7 +88,7 @@ if __name__ == '__main__':
         net_local_list.append(copy.deepcopy(net_glob))
     
     # training
-    results_save_path = os.path.join(base_dir, algo_dir, 'results.csv')
+    results_save_path = os.path.join(run_dir, 'results.csv')
 
     loss_train = []
     net_best = None
@@ -71,18 +101,19 @@ if __name__ == '__main__':
     prev_client_centroids = None
     current_smi = np.nan
     current_tdi = np.nan
+    final_metrics = None
     
     for iter in range(args.epochs):
         w_glob = None
         loss_locals = []
         
         # Client Sampling
-        m = max(int(args.frac * args.num_users), 1)
-        idxs_users = np.random.choice(range(args.num_users), m, replace=False)
-        # print("Round {}, lr: {:.6f}, {}".format(iter, lr, idxs_users))
+        m = clients_per_round
+        idxs_users = np.asarray(client_schedule[iter]['clients'], dtype=int)
         
         task=(iter//10)%task_num  # Task switch every 10 rounds
-        print('Current task: ', task)
+        print('Round {}, task {}, selected clients: {}'.format(
+            iter, task, idxs_users.tolist()))
         # Local Updates
         for idx in idxs_users:
             # Dataset name, index
@@ -117,7 +148,9 @@ if __name__ == '__main__':
         loss_avg = sum(loss_locals) / len(loss_locals)
         loss_train.append(loss_avg)
 
-        if (iter + 1) % args.test_freq == 0:
+        # Always evaluate the final round, even when test_freq does not divide
+        # the total number of rounds.
+        if (iter + 1) % args.test_freq == 0 or (iter + 1) == args.epochs:
             acc_test, acc_test_var, loss_test = test_img_local_all(net_local_list, args, dataset_test=dataset_path, task=task, return_all=False)
             
             print('Round {:3d}, Average loss {:.3f}, Test loss {:.3f}, Test accuracy: {:.2f}'.format(
@@ -135,7 +168,7 @@ if __name__ == '__main__':
                 best_acc = all_acc
                 best_epoch = iter
                 
-                best_save_path = os.path.join(base_dir, algo_dir, 'best_model.pt')
+                best_save_path = os.path.join(run_dir, 'best_model.pt')
                 
                 torch.save(net_best.state_dict(), best_save_path)
                 
@@ -163,5 +196,29 @@ if __name__ == '__main__':
             final_results = pd.DataFrame(final_results, columns=['epoch','task', 'loss_avg', 'loss_test', 'acc_test',  'all_acc','best_acc', 'smi', 'tdi'])
             #final_results = pd.DataFrame(final_results, columns=['epoch','task', 'loss_avg', 'all_acc'])
             final_results.to_csv(results_save_path, index=False)
+
+            final_metrics = {
+                'round': int(iter),
+                'task': int(task),
+                'loss_avg': float(loss_avg),
+                'loss_test': float(loss_test),
+                'acc_test': float(acc_test),
+                'all_acc': float(all_acc),
+                'smi': None if np.isnan(current_smi) else float(current_smi),
+                'tdi': None if np.isnan(current_tdi) else float(current_tdi),
+            }
+
+    final_model_path = os.path.join(run_dir, 'final_model.pt')
+    torch.save(net_glob.state_dict(), final_model_path)
+
+    if final_metrics is not None:
+        final_metrics_path = os.path.join(run_dir, 'final_metrics.json')
+        with open(final_metrics_path, 'w', encoding='utf-8') as metrics_file:
+            json.dump(final_metrics, metrics_file, indent=2, sort_keys=True)
+        print('Final round {}, task {}, all-data accuracy: {:.2f}%'.format(
+            final_metrics['round'], final_metrics['task'],
+            final_metrics['all_acc']))
+    else:
+        print('No final metrics were produced because no training round ran.')
 
     print('Best model, iter: {}, acc: {}'.format(best_epoch, best_acc))
