@@ -1931,3 +1931,83 @@ class LocalUpdateFedMTL(object):
             del old_net
         
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
+
+
+# MOON (Model-Contrastive Federated Learning, Li et al., ICML 2021)
+class LocalUpdateMOON(object):
+    """
+    Client-side MOON update.
+
+    L = L_sup + μ * L_con
+    L_con uses NT-Xent on encoder representations:
+      positive: current local model vs global model
+      negative: current local model vs previous local model
+    """
+
+    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
+        self.args = args
+        self.loss_func = nn.CrossEntropyLoss()
+        self.selected_clients = []
+        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
+        self.pretrain = pretrain
+        self.mu = getattr(args, 'moon_mu', 1.0)
+        self.temperature = getattr(args, 'moon_tau', 0.5)
+
+    def _unwrap(self, net):
+        return net.module if hasattr(net, 'module') else net
+
+    def train(self, net, global_net, prev_net=None, lr=None, idx=-1, local_eps=None):
+        net.train()
+        global_net.eval()
+        for param in global_net.parameters():
+            param.requires_grad = False
+        if prev_net is not None:
+            prev_net.eval()
+            for param in prev_net.parameters():
+                param.requires_grad = False
+
+        optimizer = torch.optim.SGD(net.parameters(), lr=lr,
+                                    momentum=self.args.momentum,
+                                    weight_decay=self.args.wd)
+
+        epoch_loss = []
+        if local_eps is None:
+            local_eps = self.args.local_ep_pretrain if self.pretrain else self.args.local_ep
+
+        local_model = self._unwrap(net)
+        glob_model = self._unwrap(global_net)
+        prev_model = self._unwrap(prev_net) if prev_net is not None else None
+
+        for _ in range(local_eps):
+            batch_loss = []
+            for images, labels in self.ldr_train:
+                images, labels = images.to(self.args.device), labels.to(self.args.device)
+
+                pro1 = local_model.extract_features(images)
+                logits = local_model.only_liner(pro1)
+                loss_sup = self.loss_func(logits, labels)
+
+                if prev_model is not None:
+                    with torch.no_grad():
+                        pro2 = glob_model.extract_features(images)
+                        pro3 = prev_model.extract_features(images)
+
+                    posi = F.cosine_similarity(pro1, pro2, dim=-1)
+                    nega = F.cosine_similarity(pro1, pro3, dim=-1)
+                    logits_con = torch.cat(
+                        [posi.unsqueeze(1), nega.unsqueeze(1)], dim=1
+                    ) / self.temperature
+                    labels_con = torch.zeros(images.size(0), dtype=torch.long, device=self.args.device)
+                    loss_con = self.loss_func(logits_con, labels_con)
+                    loss = loss_sup + self.mu * loss_con
+                else:
+                    loss = loss_sup
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                batch_loss.append(loss.item())
+
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+
+        return net.state_dict(), sum(epoch_loss) / len(epoch_loss)

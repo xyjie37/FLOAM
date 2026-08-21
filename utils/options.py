@@ -117,6 +117,10 @@ def args_parser():
     parser.add_argument('--lwf_lambda', type=float, default=1.0, help='LwF: balance weight for old task loss')
     parser.add_argument('--lwf_warmup_epochs', type=int, default=0, help='LwF: warm-up phase epochs (0=disabled)')
 
+    # MOON arguments
+    parser.add_argument('--moon_mu', type=float, default=1.0, help='MOON: weight of model-contrastive loss')
+    parser.add_argument('--moon_tau', type=float, default=0.5, help='MOON: temperature of model-contrastive loss')
+
     # FLOAM ablation flags (each isolates ONE component; default = full FLOAM)
     parser.add_argument('--ot_cost', type=str, default='anchor_geometry',
                         choices=['anchor_geometry', 'uniform'],
