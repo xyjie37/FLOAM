@@ -834,7 +834,7 @@ class LocalUpdateFedProc(object):
         )
         return F.cross_entropy(similarities, target_columns)
 
-    def _compute_local_prototypes(self, net):
+    def compute_local_prototypes(self, net):
         """Recompute class means with the final local model in eval mode."""
         net.eval()
         prototype_sums = {}
@@ -913,7 +913,7 @@ class LocalUpdateFedProc(object):
         if not epoch_loss:
             raise ValueError("local_eps must be positive.")
 
-        local_prototypes = self._compute_local_prototypes(net)
+        local_prototypes = self.compute_local_prototypes(net)
         average_loss = sum(epoch_loss) / len(epoch_loss)
         return net.state_dict(), average_loss, local_prototypes
     

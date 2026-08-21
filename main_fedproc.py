@@ -174,7 +174,8 @@ def prototype_payload_bytes(prototypes):
 
 
 def aggregate_global_prototypes(
-        previous_global_prototypes, client_prototype_uploads, round_idx):
+        previous_global_prototypes, client_prototype_uploads, round_idx,
+        phase='training'):
     """Equally average client prototypes class by class.
 
     Only clients that uploaded a class participate in that class average.
@@ -217,6 +218,7 @@ def aggregate_global_prototypes(
         uploading_clients = [item[0] for item in class_uploads]
         status_records.append({
             'round': int(round_idx),
+            'phase': str(phase),
             'class': int(class_label),
             'status': 'updated',
             'uploading_client_count': int(len(uploading_clients)),
@@ -229,6 +231,7 @@ def aggregate_global_prototypes(
     for class_label in retained_classes:
         status_records.append({
             'round': int(round_idx),
+            'phase': str(phase),
             'class': int(class_label),
             'status': 'retained',
             'uploading_client_count': 0,
@@ -236,6 +239,43 @@ def aggregate_global_prototypes(
         })
 
     return next_global_prototypes, status_records
+
+
+def run_pre_round_bootstrap(
+        args, dataset_path, net_glob, selected_clients, task,
+        local_update_cls=LocalUpdateFedProc):
+    """Build initial global prototypes without updating the global model."""
+    selected_clients = [int(client_id) for client_id in selected_clients]
+    if not selected_clients:
+        raise ValueError('Pre-round bootstrap requires at least one client.')
+
+    client_prototype_uploads = []
+    original_training_mode = net_glob.training
+    try:
+        for client_id in selected_clients:
+            local = local_update_cls(
+                args=args,
+                dataset=dataset_path,
+                idxs=client_id,
+                task=task,
+            )
+            local_prototypes = local.compute_local_prototypes(net_glob)
+            client_prototype_uploads.append(
+                (client_id, local_prototypes))
+    finally:
+        net_glob.train(original_training_mode)
+
+    global_prototypes, status_records = aggregate_global_prototypes(
+        previous_global_prototypes={},
+        client_prototype_uploads=client_prototype_uploads,
+        round_idx=0,
+        phase='bootstrap',
+    )
+    upload_bytes = int(sum(
+        prototype_payload_bytes(local_prototypes)
+        for _, local_prototypes in client_prototype_uploads
+    ))
+    return global_prototypes, status_records, upload_bytes
 
 
 if __name__ == '__main__':
@@ -314,6 +354,8 @@ if __name__ == '__main__':
     run_config = vars(args).copy()
     run_config['device'] = str(args.device)
     run_config['clients_per_round'] = clients_per_round
+    run_config['pre_round_bootstrap_enabled'] = True
+    run_config['pre_round_bootstrap_schedule_source'] = 'client_schedule[0]'
     config_path = os.path.join(run_dir, 'run_config.json')
     with open(config_path, 'w', encoding='utf-8') as config_file:
         json.dump(run_config, config_file, indent=2, sort_keys=True)
@@ -348,6 +390,10 @@ if __name__ == '__main__':
         run_dir, 'resource_metrics.json')
     prototype_status_save_path = os.path.join(
         run_dir, 'prototype_round_status.csv')
+    bootstrap_metrics_save_path = os.path.join(
+        run_dir, 'bootstrap_metrics.json')
+    bootstrap_prototypes_save_path = os.path.join(
+        run_dir, 'bootstrap_global_prototypes.pt')
 
     model_state_bytes = int(sum(
         tensor.numel() * tensor.element_size()
@@ -380,6 +426,93 @@ if __name__ == '__main__':
     global_prototypes = {}
     prototype_status_records = []
 
+    bootstrap_seconds = 0.0
+    bootstrap_prototype_upload_bytes = 0
+    bootstrap_metrics = {
+        'executed': False,
+        'execution_count': 0,
+        'schedule_source': 'client_schedule[0]',
+    }
+    if args.epochs > 0:
+        bootstrap_clients = [
+            int(client_id)
+            for client_id in client_schedule[0]['clients']
+        ]
+        bootstrap_task = int(client_schedule[0]['task'])
+        if bootstrap_task != 0:
+            raise ValueError(
+                'Pre-round bootstrap must use task 0, got task {}.'.format(
+                    bootstrap_task))
+
+        print(
+            'Pre-round bootstrap, task {}, selected clients: {}'.format(
+                bootstrap_task, bootstrap_clients))
+        sync_device(args.device)
+        bootstrap_wall_start = time.perf_counter()
+        (
+            global_prototypes,
+            bootstrap_status_records,
+            bootstrap_prototype_upload_bytes,
+        ) = run_pre_round_bootstrap(
+            args=args,
+            dataset_path=dataset_path,
+            net_glob=net_glob,
+            selected_clients=bootstrap_clients,
+            task=bootstrap_task,
+        )
+        sync_device(args.device)
+        bootstrap_seconds = time.perf_counter() - bootstrap_wall_start
+
+        prototype_status_records.extend(bootstrap_status_records)
+        for status_row in bootstrap_status_records:
+            print(
+                'Pre-round bootstrap initialized global prototype class {} '
+                'from {} client(s): [{}].'.format(
+                    status_row['class'],
+                    status_row['uploading_client_count'],
+                    status_row['uploading_clients'],
+                ))
+        pd.DataFrame(prototype_status_records).to_csv(
+            prototype_status_save_path, index=False)
+        torch.save(global_prototypes, bootstrap_prototypes_save_path)
+
+        bootstrap_metrics = {
+            'executed': True,
+            'execution_count': 1,
+            'task': bootstrap_task,
+            'selected_clients': bootstrap_clients,
+            'selected_client_count': len(bootstrap_clients),
+            'schedule_source': 'client_schedule[0]',
+            'uses_untrained_unified_global_model': True,
+            'local_training_performed': False,
+            'future_task_data_used': False,
+            'model_download_reused_by_round_zero': True,
+            'extra_model_communication_bytes': 0,
+            'prototype_upload_bytes': int(
+                bootstrap_prototype_upload_bytes),
+            'prototype_download_bytes': 0,
+            'initial_global_prototype_class_count': int(
+                len(global_prototypes)),
+            'wall_seconds': float(bootstrap_seconds),
+        }
+        print(
+            'Pre-round bootstrap completed: classes={}, '
+            'prototype_upload_bytes={}, time={:.3f}s.'.format(
+                len(global_prototypes),
+                bootstrap_prototype_upload_bytes,
+                bootstrap_seconds,
+            ))
+
+    with open(
+            bootstrap_metrics_save_path,
+            'w', encoding='utf-8') as bootstrap_metrics_file:
+        json.dump(
+            bootstrap_metrics,
+            bootstrap_metrics_file,
+            indent=2,
+            sort_keys=True,
+        )
+
     sync_device(args.device)
     training_loop_start = time.perf_counter()
 
@@ -394,7 +527,10 @@ if __name__ == '__main__':
         idxs_users = np.asarray(client_schedule[iter]['clients'], dtype=int)
         round_prototype_download_bytes = int(
             len(idxs_users) * prototype_payload_bytes(global_prototypes))
-        round_prototype_upload_bytes = 0
+        round_bootstrap_prototype_upload_bytes = int(
+            bootstrap_prototype_upload_bytes if iter == 0 else 0)
+        round_prototype_upload_bytes = int(
+            round_bootstrap_prototype_upload_bytes)
         client_prototype_uploads = []
 
         task=(iter//10)%task_num  # Task switch every 10 rounds
@@ -625,6 +761,8 @@ if __name__ == '__main__':
                 model_upload_bytes_per_round
                 + model_download_bytes_per_round),
             'prototype_upload_bytes': int(round_prototype_upload_bytes),
+            'bootstrap_prototype_upload_bytes': int(
+                round_bootstrap_prototype_upload_bytes),
             'prototype_download_bytes': int(round_prototype_download_bytes),
             'prototype_total_bytes': int(
                 round_prototype_upload_bytes
@@ -668,6 +806,9 @@ if __name__ == '__main__':
                     for row in current_stage_rounds)),
                 'prototype_upload_bytes': int(sum(
                     row['prototype_upload_bytes']
+                    for row in current_stage_rounds)),
+                'bootstrap_prototype_upload_bytes': int(sum(
+                    row['bootstrap_prototype_upload_bytes']
                     for row in current_stage_rounds)),
                 'prototype_download_bytes': int(sum(
                     row['prototype_download_bytes']
@@ -746,6 +887,11 @@ if __name__ == '__main__':
         'summed_round_training_seconds': total_training_seconds,
         'summed_round_evaluation_seconds': total_evaluation_seconds,
         'summed_round_total_seconds': total_round_seconds,
+        'pre_round_bootstrap_wall_seconds': float(bootstrap_seconds),
+        'pre_round_bootstrap_execution_count': int(
+            bootstrap_metrics['execution_count']),
+        'pre_round_bootstrap_prototype_upload_bytes': int(
+            bootstrap_prototype_upload_bytes),
         'peak_gpu_memory_allocated_bytes': peak_memory_allocated_bytes,
         'peak_gpu_memory_reserved_bytes': peak_memory_reserved_bytes,
         'model_state_payload_bytes': model_state_bytes,
@@ -775,7 +921,10 @@ if __name__ == '__main__':
             'round. In-process broadcasts to unselected model copies are not '
             'counted. Every selected FedProc client also downloads all global '
             'prototypes available before its round and uploads only prototypes '
-            'for classes present in its current local data.'
+            'for classes present in its current local data. The one-time '
+            'pre-round bootstrap reuses the round-zero model delivery, adds '
+            'only its initial local-prototype uploads, and is included in '
+            'round-zero prototype upload bytes.'
         ),
     }
     with open(

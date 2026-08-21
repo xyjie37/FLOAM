@@ -131,7 +131,7 @@ def test_local_prototype_recomputation():
     net = ForwardOnlyWrapper(base_net)
     assert not hasattr(net, "extract_features")
     net.train()
-    local_prototypes = updater._compute_local_prototypes(net)
+    local_prototypes = updater.compute_local_prototypes(net)
 
     assert set(local_prototypes) == {0, 1}
     assert torch.allclose(local_prototypes[0], torch.tensor([3.0, 6.0]))

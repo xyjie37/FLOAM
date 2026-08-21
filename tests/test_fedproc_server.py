@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import torch
+from torch import nn
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -10,7 +11,39 @@ sys.path.insert(0, str(REPO_ROOT))
 from main_fedproc import (
     aggregate_global_prototypes,
     prototype_payload_bytes,
+    run_pre_round_bootstrap,
 )
+
+
+class FakeBootstrapLocalUpdate:
+    init_calls = []
+    model_ids = []
+
+    def __init__(self, args, dataset, idxs, task):
+        self.client_id = int(idxs)
+        self.init_calls.append({
+            "args": args,
+            "dataset": dataset,
+            "client_id": self.client_id,
+            "task": int(task),
+        })
+
+    def compute_local_prototypes(self, net):
+        self.model_ids.append(id(net))
+        net.eval()
+        if self.client_id == 4:
+            return {
+                0: torch.tensor([1.0, 3.0]),
+                1: torch.tensor([2.0, 4.0]),
+            }
+        if self.client_id == 7:
+            return {
+                0: torch.tensor([5.0, 7.0]),
+            }
+        raise AssertionError("Unexpected bootstrap client.")
+
+    def train(self, *args, **kwargs):
+        raise AssertionError("Bootstrap must not perform local training.")
 
 
 def test_classwise_equal_aggregation_and_retention():
@@ -86,6 +119,60 @@ def test_all_previous_classes_retained_without_uploads():
     print("retained_status_logged=True")
 
 
+def test_pre_round_bootstrap_uses_frozen_round_zero_selection():
+    FakeBootstrapLocalUpdate.init_calls = []
+    FakeBootstrapLocalUpdate.model_ids = []
+    net = nn.Linear(2, 2)
+    net.train()
+    state_before = {
+        key: value.detach().clone()
+        for key, value in net.state_dict().items()
+    }
+
+    prototypes, status_records, upload_bytes = run_pre_round_bootstrap(
+        args=object(),
+        dataset_path="task0-only-dataset",
+        net_glob=net,
+        selected_clients=[4, 7],
+        task=0,
+        local_update_cls=FakeBootstrapLocalUpdate,
+    )
+
+    assert [
+        call["client_id"] for call in FakeBootstrapLocalUpdate.init_calls
+    ] == [4, 7]
+    assert all(
+        call["task"] == 0 for call in FakeBootstrapLocalUpdate.init_calls
+    )
+    assert all(
+        call["dataset"] == "task0-only-dataset"
+        for call in FakeBootstrapLocalUpdate.init_calls
+    )
+    assert len(set(FakeBootstrapLocalUpdate.model_ids)) == 1
+    assert FakeBootstrapLocalUpdate.model_ids[0] == id(net)
+    assert net.training
+    assert all(
+        torch.equal(net.state_dict()[key], value)
+        for key, value in state_before.items()
+    )
+
+    assert torch.allclose(prototypes[0], torch.tensor([3.0, 5.0]))
+    assert torch.allclose(prototypes[1], torch.tensor([2.0, 4.0]))
+    assert upload_bytes == 24
+    assert all(row["phase"] == "bootstrap" for row in status_records)
+    assert all(row["round"] == 0 for row in status_records)
+
+    print("bootstrap_selected_clients=[4, 7]")
+    print("bootstrap_task_0_only=True")
+    print("bootstrap_uses_one_unified_model=True")
+    print("bootstrap_local_training_performed=False")
+    print("bootstrap_model_state_unchanged=True")
+    print("bootstrap_model_mode_restored=True")
+    print("bootstrap_equal_prototype_aggregation=True")
+    print("bootstrap_upload_bytes=24")
+
+
 if __name__ == "__main__":
     test_classwise_equal_aggregation_and_retention()
     test_all_previous_classes_retained_without_uploads()
+    test_pre_round_bootstrap_uses_frozen_round_zero_selection()
