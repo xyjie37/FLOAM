@@ -844,7 +844,7 @@ class LocalUpdateFedProc(object):
             for images, labels in self.ldr_train:
                 images = images.to(self.args.device)
                 labels = labels.to(self.args.device)
-                z = net.extract_features(images)
+                _, z = net(images, returnFeature=True)
 
                 for label in labels.unique():
                     class_label = int(label.item())

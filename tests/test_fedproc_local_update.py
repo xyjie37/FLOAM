@@ -24,6 +24,24 @@ class ToyFeatureNet(nn.Module):
         self.extract_calls_in_eval.append(not self.training)
         return images
 
+    def forward(self, images, returnFeature=False):
+        z = self.extract_features(images)
+        logits = torch.zeros(images.size(0), 1, device=images.device)
+        if returnFeature:
+            return logits, z
+        return logits
+
+
+class ForwardOnlyWrapper(nn.Module):
+    """Mimic wrappers such as DataParallel that expose forward but not helpers."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
 
 class ToyFedProcNet(nn.Module):
     def __init__(self):
@@ -109,7 +127,9 @@ def test_local_prototype_recomputation():
         TensorDataset(features, labels), batch_size=2, shuffle=False
     )
 
-    net = ToyFeatureNet()
+    base_net = ToyFeatureNet()
+    net = ForwardOnlyWrapper(base_net)
+    assert not hasattr(net, "extract_features")
     net.train()
     local_prototypes = updater._compute_local_prototypes(net)
 
@@ -117,12 +137,13 @@ def test_local_prototype_recomputation():
     assert torch.allclose(local_prototypes[0], torch.tensor([3.0, 6.0]))
     assert torch.allclose(local_prototypes[1], torch.tensor([12.0, 6.0]))
     assert not net.training
-    assert all(net.extract_calls_in_eval)
+    assert all(base_net.extract_calls_in_eval)
 
     print("prototype_class_0=", local_prototypes[0].tolist())
     print("prototype_class_1=", local_prototypes[1].tolist())
     print("prototype_uses_exact_sample_mean=True")
     print("prototype_recomputed_in_eval_mode=True")
+    print("prototype_forward_wrapper_compatible=True")
 
 
 def make_training_updater(images, labels):
