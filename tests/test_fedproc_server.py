@@ -131,7 +131,8 @@ def test_pre_round_bootstrap_uses_frozen_round_zero_selection():
     }
     torch_rng_before = torch.random.get_rng_state()
 
-    prototypes, status_records, upload_bytes = run_pre_round_bootstrap(
+    prototypes, status_records, upload_bytes, forward_seconds = \
+        run_pre_round_bootstrap(
         args=object(),
         dataset_path="task0-only-dataset",
         net_glob=net,
@@ -163,6 +164,7 @@ def test_pre_round_bootstrap_uses_frozen_round_zero_selection():
     assert torch.allclose(prototypes[0], torch.tensor([3.0, 5.0]))
     assert torch.allclose(prototypes[1], torch.tensor([2.0, 4.0]))
     assert upload_bytes == 24
+    assert forward_seconds >= 0.0
     assert all(row["phase"] == "bootstrap" for row in status_records)
     assert all(row["round"] == 0 for row in status_records)
 
@@ -175,6 +177,7 @@ def test_pre_round_bootstrap_uses_frozen_round_zero_selection():
     print("bootstrap_rng_state_restored=True")
     print("bootstrap_equal_prototype_aggregation=True")
     print("bootstrap_upload_bytes=24")
+    print("bootstrap_feature_forward_time_recorded=True")
 
 
 if __name__ == "__main__":

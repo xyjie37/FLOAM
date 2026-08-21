@@ -30,6 +30,7 @@ from models.test import (
     test_global_model_on_task,
 )
 from utils.runtime_utils import sync_device
+from utils.continual_metrics import compute_continual_metrics
 
 import pdb
 from collections import defaultdict
@@ -107,60 +108,6 @@ def collect_environment(dataset_path):
         })
 
     return environment
-
-
-def compute_continual_metrics(task_accuracy_matrix):
-    """Compute unambiguous continual-learning metrics from an ACC matrix."""
-    matrix = np.asarray(task_accuracy_matrix, dtype=float)
-    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
-        raise ValueError('The task accuracy matrix must be square.')
-
-    task_num = matrix.shape[1]
-    final_task_accuracies = matrix[-1, :]
-    if np.isnan(final_task_accuracies).any():
-        raise ValueError(
-            'The final matrix row must contain an accuracy for every task.')
-
-    final_acc = float(np.mean(final_task_accuracies))
-    forgetting_details = []
-
-    # The final task has no later stage in which forgetting can be observed.
-    for task_id in range(task_num - 1):
-        prior_history = matrix[task_id:-1, task_id]
-        valid_history = prior_history[~np.isnan(prior_history)]
-        if valid_history.size == 0:
-            raise ValueError(
-                'No pre-final accuracy found for task {}.'.format(task_id))
-
-        prior_peak = float(np.max(valid_history))
-        final_task_acc = float(final_task_accuracies[task_id])
-        signed_forgetting = prior_peak - final_task_acc
-        forgetting_details.append({
-            'task': int(task_id),
-            'prior_peak_acc_percent': prior_peak,
-            'final_acc_percent': final_task_acc,
-            'signed_forgetting_percent_points': signed_forgetting,
-        })
-
-    if forgetting_details:
-        mean_signed_forgetting = float(np.mean([
-            row['signed_forgetting_percent_points']
-            for row in forgetting_details
-        ]))
-    else:
-        mean_signed_forgetting = None
-
-    metrics = {
-        'final_acc_task_macro_percent': final_acc,
-        'mean_signed_forgetting_percent_points': mean_signed_forgetting,
-        'forgetting_definition': (
-            'For each non-final task: maximum accuracy after it was learned '
-            'and before the final stage, minus its final-stage accuracy. '
-            'Negative values are retained.'
-        ),
-        'arf_status': 'not_computed_formula_not_confirmed',
-    }
-    return metrics, pd.DataFrame(forgetting_details)
 
 
 if __name__ == '__main__':
@@ -371,12 +318,20 @@ if __name__ == '__main__':
                         stage_idx, eval_task, task_acc, task_loss,
                         task_samples))
 
-            stage_acc = float(np.nanmean(
-                task_accuracy_matrix[stage_idx, :stage_idx + 1]))
+            stage_continual_metrics, _ = compute_continual_metrics(
+                task_accuracy_matrix, final_stage=stage_idx)
+            stage_acc = stage_continual_metrics[
+                'final_acc_task_macro_percent']
             stage_metrics.append({
                 'stage': int(stage_idx),
                 'round': int(iter + 1),
                 'stage_acc': stage_acc,
+                'stage_arf_clipped_absolute_percent_points': (
+                    stage_continual_metrics[
+                        'arf_clipped_absolute_percent_points']),
+                'stage_mean_signed_forgetting_percent_points': (
+                    stage_continual_metrics[
+                        'mean_signed_forgetting_percent_points']),
                 'evaluated_tasks': int(stage_idx + 1),
                 'evaluated_samples': int(evaluated_samples),
             })
@@ -392,8 +347,16 @@ if __name__ == '__main__':
             completed_matrix.to_csv(task_matrix_save_path, index=False)
             pd.DataFrame(stage_metrics).to_csv(
                 stage_metrics_save_path, index=False)
-            print('Stage {} average accuracy: {:.2f}%'.format(
-                stage_idx, stage_acc))
+            print(
+                'Stage {}: ACC {:.2f}%, ARF {:.2f}, signed forgetting '
+                '{:.2f} percentage points'.format(
+                    stage_idx,
+                    stage_acc,
+                    stage_continual_metrics[
+                        'arf_clipped_absolute_percent_points'],
+                    stage_continual_metrics[
+                        'mean_signed_forgetting_percent_points'],
+                ))
 
             if stage_idx == task_num - 1:
                 continual_metrics, forgetting_details = \
@@ -415,10 +378,12 @@ if __name__ == '__main__':
                 forgetting_details.to_csv(
                     forgetting_details_save_path, index=False)
                 print(
-                    'Final task-macro ACC: {:.2f}%, mean signed forgetting: '
-                    '{:.2f} percentage points'.format(
+                    'Final task-macro ACC: {:.2f}%, ARF: {:.2f}, '
+                    'mean signed forgetting: {:.2f} percentage points'.format(
                         continual_metrics[
                             'final_acc_task_macro_percent'],
+                        continual_metrics[
+                            'arf_clipped_absolute_percent_points'],
                         continual_metrics[
                             'mean_signed_forgetting_percent_points'],
                     ))
