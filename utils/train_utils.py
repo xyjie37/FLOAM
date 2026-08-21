@@ -124,6 +124,12 @@ def get_model(args):
         net_glob = MobileNetCifar(num_classes=args.num_classes).to(args.device)
     elif args.model == 'resnet18' and args.dataset in ['cifar10', 'cifar100', 'cinic10']:
         net_glob = ResNet18(num_classes=args.num_classes).to(args.device)
+    elif args.model == 'fedproc_resnet18' and args.dataset in ['cifar10', 'cifar100', 'cinic10']:
+        from models.FedProcNet import FedProcNet
+        net_glob = FedProcNet(
+            num_classes=args.num_classes,
+            z_dim=getattr(args, 'fedproc_z_dim', 256),
+        ).to(args.device)
     elif args.model == 'tinyresnet18' and args.dataset == 'tinyimagenet':
         net_glob = TinyResNet18(num_classes=args.num_classes).to(args.device)
     elif args.model == 'resnet18_imagenet' and args.dataset == 'imagenet100':

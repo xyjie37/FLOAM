@@ -85,6 +85,12 @@ def args_parser():
     parser.add_argument('--mode', type=str, default = 'mode1')
     parser.add_argument('--m', type=int, default = '20')       #20 for cifar100
     parser.add_argument('--z_dim', type=int, default=100, help="Generator input dimension")
+    parser.add_argument(
+        '--fedproc_z_dim',
+        type=int,
+        default=256,
+        help='FedProc projection output dimension (default: 256)',
+    )
     parser.add_argument('--g_lr', type=float, default=1e-4, help="Generator learning rate")
     parser.add_argument('--lambda1', type=float, default=0.1, help="Boundary loss weight")
     parser.add_argument('--lambda2', type=float, default=0.01, help="BatchNorm loss weight")
