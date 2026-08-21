@@ -109,6 +109,16 @@ def test_global_prototype_loss():
     print("no_valid_batch_returns_none=True")
 
 
+def test_alpha_schedule_key_rounds():
+    assert LocalUpdateFedProc.alpha_for_round(0, 10) == 1.0
+    assert LocalUpdateFedProc.alpha_for_round(5, 10) == 0.5
+    assert abs(LocalUpdateFedProc.alpha_for_round(9, 10) - 0.1) < 1e-12
+
+    print("alpha_t0=1.0")
+    print("alpha_t_half=0.5")
+    print("alpha_t_last=0.1")
+
+
 def test_local_prototype_recomputation():
     features = torch.tensor(
         [
@@ -189,6 +199,15 @@ def test_full_training_loss_and_fallback():
     assert net.scale.grad.abs().item() > 0.0
     assert "scale" in weights
     assert set(local_prototypes) == {0, 1}
+    assert updater.last_training_metrics["alpha_t"] == 0.6
+    assert abs(
+        updater.last_training_metrics["average_weighted_gpc"]
+        - (0.6 * gpc_loss).item()
+    ) < 1e-6
+    assert abs(
+        updater.last_training_metrics["average_weighted_ce"]
+        - (0.4 * ce_loss).item()
+    ) < 1e-6
 
     fallback_updater = make_training_updater(images, labels)
     fallback_net = ToyFedProcNet()
@@ -211,6 +230,64 @@ def test_full_training_loss_and_fallback():
     print("no_valid_positive_uses_full_ce=True")
 
 
+def test_explicit_ce_ablation_matches_disabled_prototype_pipeline():
+    images = torch.tensor([[1.0, 0.0], [0.0, 2.0]])
+    labels = torch.tensor([0, 1])
+    global_prototypes = {
+        0: torch.tensor([1.0, 0.0]),
+        1: torch.tensor([0.0, 1.0]),
+    }
+
+    ce_only_updater = make_training_updater(images, labels)
+    ce_only_net = ToyFedProcNet()
+    ce_weights, ce_loss, ce_prototypes = ce_only_updater.train(
+        net=ce_only_net,
+        lr=0.1,
+        global_prototypes=global_prototypes,
+        global_round=0,
+        total_rounds=10,
+        local_eps=1,
+        alpha_override=0.0,
+        compute_prototypes=True,
+    )
+
+    no_proto_updater = make_training_updater(images, labels)
+    no_proto_net = ToyFedProcNet()
+    no_proto_weights, no_proto_loss, no_proto_upload = no_proto_updater.train(
+        net=no_proto_net,
+        lr=0.1,
+        global_prototypes={},
+        global_round=0,
+        total_rounds=10,
+        local_eps=1,
+        alpha_override=0.0,
+        compute_prototypes=False,
+    )
+
+    assert abs(ce_loss - no_proto_loss) < 1e-7
+    assert all(
+        torch.equal(ce_weights[key], no_proto_weights[key])
+        for key in ce_weights
+    )
+    assert set(ce_prototypes) == {0, 1}
+    assert no_proto_upload == {}
+    assert ce_only_updater.last_training_metrics["alpha_t"] == 0.0
+    assert (
+        ce_only_updater.last_training_metrics["average_weighted_gpc"]
+        == 0.0
+    )
+    assert abs(
+        ce_only_updater.last_training_metrics["average_weighted_ce"]
+        - ce_only_updater.last_training_metrics["average_total_loss"]
+    ) < 1e-7
+    assert no_proto_updater.last_training_metrics[
+        "local_prototype_class_count"
+    ] == 0
+
+    print("explicit_ce_only_matches_no_proto_alpha0=True")
+    print("no_proto_alpha0_upload_is_empty=True")
+
+
 def test_real_fedproc_network_integration():
     torch.manual_seed(0)
     images = torch.randn(4, 3, 32, 32)
@@ -231,7 +308,7 @@ def test_real_fedproc_network_integration():
         net=net,
         lr=0.001,
         global_prototypes=global_prototypes,
-        global_round=3,
+        global_round=0,
         total_rounds=10,
         local_eps=1,
     )
@@ -241,13 +318,32 @@ def test_real_fedproc_network_integration():
     assert not torch.allclose(
         projection_before, net.projection_head[0].weight.detach()
     )
+    assert any(
+        parameter.grad is not None
+        and parameter.grad.detach().abs().sum().item() > 0.0
+        for parameter in net.backbone.parameters()
+    )
+    assert any(
+        parameter.grad is not None
+        and parameter.grad.detach().abs().sum().item() > 0.0
+        for parameter in net.projection_head.parameters()
+    )
+    assert all(
+        parameter.grad is None
+        or parameter.grad.detach().abs().sum().item() == 0.0
+        for parameter in net.classifier.parameters()
+    )
     assert "projection_head.0.weight" in weights
     assert "classifier.weight" in weights
     assert set(local_prototypes) == {0, 1, 2}
     assert all(prototype.shape == (256,) for prototype in local_prototypes.values())
     assert all(torch.isfinite(prototype).all() for prototype in local_prototypes.values())
+    assert all(not prototype.requires_grad for prototype in local_prototypes.values())
 
     print("real_fedproc_train_step=True")
+    print("pure_gpc_reaches_backbone=True")
+    print("pure_gpc_reaches_projection_head=True")
+    print("pure_gpc_does_not_reach_classifier=True")
     print("projection_head_updated=True")
     print("returned_local_prototype_classes=[0, 1, 2]")
     print("returned_local_prototype_dim=256")
@@ -255,6 +351,8 @@ def test_real_fedproc_network_integration():
 
 if __name__ == "__main__":
     test_global_prototype_loss()
+    test_alpha_schedule_key_rounds()
     test_local_prototype_recomputation()
     test_full_training_loss_and_fallback()
+    test_explicit_ce_ablation_matches_disabled_prototype_pipeline()
     test_real_fedproc_network_integration()

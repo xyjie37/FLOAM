@@ -30,6 +30,10 @@ from models.test import (
     test_global_model_on_task,
 )
 from utils.runtime_utils import sync_device
+from utils.fedproc_validation import (
+    FedProcValidationRecorder,
+    preserve_rng_state,
+)
 
 import pdb
 from collections import defaultdict
@@ -243,7 +247,7 @@ def aggregate_global_prototypes(
 
 def run_pre_round_bootstrap(
         args, dataset_path, net_glob, selected_clients, task,
-        local_update_cls=LocalUpdateFedProc):
+        local_update_cls=LocalUpdateFedProc, preserve_rng=False):
     """Build initial global prototypes without updating the global model."""
     selected_clients = [int(client_id) for client_id in selected_clients]
     if not selected_clients:
@@ -251,19 +255,16 @@ def run_pre_round_bootstrap(
 
     client_prototype_uploads = []
     original_training_mode = net_glob.training
-    try:
-        for client_id in selected_clients:
-            local = local_update_cls(
-                args=args,
-                dataset=dataset_path,
-                idxs=client_id,
-                task=task,
-            )
-            local_prototypes = local.compute_local_prototypes(net_glob)
-            client_prototype_uploads.append(
-                (client_id, local_prototypes))
-    finally:
-        net_glob.train(original_training_mode)
+    with preserve_rng_state(preserve_rng):
+        try:
+            for client_id in selected_clients:
+                local = local_update_cls(
+                    args=args, dataset=dataset_path,
+                    idxs=client_id, task=task)
+                client_prototype_uploads.append(
+                    (client_id, local.compute_local_prototypes(net_glob)))
+        finally:
+            net_glob.train(original_training_mode)
 
     global_prototypes, status_records = aggregate_global_prototypes(
         previous_global_prototypes={},
@@ -300,6 +301,10 @@ if __name__ == '__main__':
     client_rng = np.random.default_rng(args.seed)
     task_num = args.task_num
     args.device = torch.device('cuda'if torch.cuda.is_available() else 'cpu')
+    prototype_transmission_enabled = (
+        args.fedproc_ablation != 'no_proto_alpha0')
+    alpha_override = (
+        0.0 if args.fedproc_ablation != 'none' else None)
 
     base_dir = './save/{}/{}_num{}_C{}_le{}_bs{}_round{}_m{}_lr{}/{}/'.format(
         dataset_path, args.model, args.num_users, args.frac, args.local_ep, args.local_bs, args.epochs, args.momentum, args.lr, args.results_save)
@@ -354,8 +359,12 @@ if __name__ == '__main__':
     run_config = vars(args).copy()
     run_config['device'] = str(args.device)
     run_config['clients_per_round'] = clients_per_round
-    run_config['pre_round_bootstrap_enabled'] = True
+    run_config['pre_round_bootstrap_enabled'] = bool(
+        prototype_transmission_enabled)
     run_config['pre_round_bootstrap_schedule_source'] = 'client_schedule[0]'
+    run_config['prototype_transmission_enabled'] = bool(
+        prototype_transmission_enabled)
+    run_config['fedproc_alpha_override'] = alpha_override
     config_path = os.path.join(run_dir, 'run_config.json')
     with open(config_path, 'w', encoding='utf-8') as config_file:
         json.dump(run_config, config_file, indent=2, sort_keys=True)
@@ -394,6 +403,8 @@ if __name__ == '__main__':
         run_dir, 'bootstrap_metrics.json')
     bootstrap_prototypes_save_path = os.path.join(
         run_dir, 'bootstrap_global_prototypes.pt')
+    validator = FedProcValidationRecorder(
+        run_dir, args.fedproc_validation_logging)
 
     model_state_bytes = int(sum(
         tensor.numel() * tensor.element_size()
@@ -433,7 +444,7 @@ if __name__ == '__main__':
         'execution_count': 0,
         'schedule_source': 'client_schedule[0]',
     }
-    if args.epochs > 0:
+    if args.epochs > 0 and prototype_transmission_enabled:
         bootstrap_clients = [
             int(client_id)
             for client_id in client_schedule[0]['clients']
@@ -459,6 +470,7 @@ if __name__ == '__main__':
             net_glob=net_glob,
             selected_clients=bootstrap_clients,
             task=bootstrap_task,
+            preserve_rng=args.fedproc_ablation != 'none',
         )
         sync_device(args.device)
         bootstrap_seconds = time.perf_counter() - bootstrap_wall_start
@@ -502,6 +514,14 @@ if __name__ == '__main__':
                 bootstrap_prototype_upload_bytes,
                 bootstrap_seconds,
             ))
+    elif args.epochs > 0:
+        bootstrap_metrics.update({
+            'disabled_reason': 'fedproc_ablation=no_proto_alpha0',
+            'prototype_transmission_enabled': False,
+        })
+        print(
+            'Pre-round bootstrap disabled by '
+            '--fedproc_ablation no_proto_alpha0.')
 
     with open(
             bootstrap_metrics_save_path,
@@ -534,6 +554,8 @@ if __name__ == '__main__':
         client_prototype_uploads = []
 
         task=(iter//10)%task_num  # Task switch every 10 rounds
+        validator.log_downlink(
+            iter, task, idxs_users, net_glob, global_prototypes)
         print('Round {}, task {}, selected clients: {}'.format(
             iter, task, idxs_users.tolist()))
         # Local Updates
@@ -548,6 +570,9 @@ if __name__ == '__main__':
                 global_prototypes=global_prototypes,
                 global_round=iter,
                 total_rounds=args.epochs,
+                alpha_override=alpha_override,
+                compute_prototypes=prototype_transmission_enabled,
+                preserve_prototype_rng=args.fedproc_ablation != 'none',
             )
 
             loss_locals.append(copy.deepcopy(loss))
@@ -555,6 +580,12 @@ if __name__ == '__main__':
                 (int(idx), local_prototypes))
             round_prototype_upload_bytes += prototype_payload_bytes(
                 local_prototypes)
+
+            validator.log_client(
+                iter, task, idx, net_local, local, local_prototypes,
+                {'ablation': args.fedproc_ablation,
+                 **local.last_training_metrics},
+                prototype_transmission_enabled, args.device)
 
             if w_glob is None:
                 w_glob = copy.deepcopy(w_local)
@@ -591,6 +622,8 @@ if __name__ == '__main__':
                         iter, status_row['class']))
         pd.DataFrame(prototype_status_records).to_csv(
             prototype_status_save_path, index=False)
+
+        validator.finish_round(iter)
 
         # Broadcast
         update_keys = list(w_glob.keys())
@@ -880,6 +913,11 @@ if __name__ == '__main__':
         total_prototype_upload_bytes + total_prototype_download_bytes)
 
     resource_metrics = {
+        'fedproc_ablation': args.fedproc_ablation,
+        'prototype_transmission_enabled': bool(
+            prototype_transmission_enabled),
+        'validation_logging_enabled': bool(
+            args.fedproc_validation_logging),
         'completed_rounds': int(len(round_runtime_records)),
         'program_wall_seconds': float(
             time.perf_counter() - program_wall_start),
@@ -919,12 +957,18 @@ if __name__ == '__main__':
             'Logical federated communication: every selected client downloads '
             'one complete model state and uploads one complete model state per '
             'round. In-process broadcasts to unselected model copies are not '
-            'counted. Every selected FedProc client also downloads all global '
-            'prototypes available before its round and uploads only prototypes '
-            'for classes present in its current local data. The one-time '
-            'pre-round bootstrap reuses the round-zero model delivery, adds '
-            'only its initial local-prototype uploads, and is included in '
-            'round-zero prototype upload bytes.'
+            'counted. '
+            + (
+                'Every selected FedProc client also downloads all global '
+                'prototypes available before its round and uploads only '
+                'prototypes for classes present in its current local data. '
+                'The one-time pre-round bootstrap reuses the round-zero model '
+                'delivery, adds only its initial local-prototype uploads, and '
+                'is included in round-zero prototype upload bytes.'
+                if prototype_transmission_enabled else
+                'Prototype bootstrap, download, upload, and aggregation are '
+                'disabled by the no_proto_alpha0 validation ablation.'
+            )
         ),
     }
     with open(

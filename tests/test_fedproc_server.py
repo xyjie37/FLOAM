@@ -31,6 +31,7 @@ class FakeBootstrapLocalUpdate:
     def compute_local_prototypes(self, net):
         self.model_ids.append(id(net))
         net.eval()
+        torch.rand(1)
         if self.client_id == 4:
             return {
                 0: torch.tensor([1.0, 3.0]),
@@ -128,6 +129,7 @@ def test_pre_round_bootstrap_uses_frozen_round_zero_selection():
         key: value.detach().clone()
         for key, value in net.state_dict().items()
     }
+    torch_rng_before = torch.random.get_rng_state()
 
     prototypes, status_records, upload_bytes = run_pre_round_bootstrap(
         args=object(),
@@ -136,6 +138,7 @@ def test_pre_round_bootstrap_uses_frozen_round_zero_selection():
         selected_clients=[4, 7],
         task=0,
         local_update_cls=FakeBootstrapLocalUpdate,
+        preserve_rng=True,
     )
 
     assert [
@@ -155,6 +158,7 @@ def test_pre_round_bootstrap_uses_frozen_round_zero_selection():
         torch.equal(net.state_dict()[key], value)
         for key, value in state_before.items()
     )
+    assert torch.equal(torch.random.get_rng_state(), torch_rng_before)
 
     assert torch.allclose(prototypes[0], torch.tensor([3.0, 5.0]))
     assert torch.allclose(prototypes[1], torch.tensor([2.0, 4.0]))
@@ -168,6 +172,7 @@ def test_pre_round_bootstrap_uses_frozen_round_zero_selection():
     print("bootstrap_local_training_performed=False")
     print("bootstrap_model_state_unchanged=True")
     print("bootstrap_model_mode_restored=True")
+    print("bootstrap_rng_state_restored=True")
     print("bootstrap_equal_prototype_aggregation=True")
     print("bootstrap_upload_bytes=24")
 
