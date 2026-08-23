@@ -1,14 +1,11 @@
 from torchvision import datasets, transforms
 from models.Nets import CNNCifar, MobileNetCifar, CNNMnist
 from models.ResNet import ResNet18, ResNet50
-from models.ResNetFedTA import ResNetFedTA
 from models.tinyresnet import TinyResNet18
 from models.resnet_imagenet import ResNet18_ImageNet
 from utils.sampling import iid, noniid, iid_unbalanced, noniid_unbalanced
 from models.speechresnet import SpeechResNet18
-from models.TextCNNFedTA import TextCNNFedTA
 from models.TextCNN import TextCNN
-from models.GenericFedTA import GenericFedTA
 
 
 def get_auto_model(dataset):
@@ -157,24 +154,16 @@ def get_model(args):
 
 
 def get_fedta_model(args):
-    """
-    Get FedTA-wrapped model based on dataset/model type.
-    - textcnn datasets (text): Use TextCNNFedTA
-    - speechresnet/tinyresnet18: Use GenericFedTA
-    - resnet18/resnet50 (image): Use ResNetFedTA (existing)
-    """
+    """Wrap the base model with the unified FedTA adapter."""
+    from models.FedTA import FedTAWrapper
+
     base = get_model(args)
-    num_ie = getattr(args, 'num_ie', 10)
-
-    # Select appropriate FedTA wrapper based on model type
-    model_name = args.model if hasattr(args, 'model') else 'resnet18'
-
-    if model_name == 'textcnn':
-        # Text datasets use TextCNNFedTA
-        return TextCNNFedTA(base, args.num_classes, num_ie=num_ie)
-    elif model_name in ['speechresnet', 'tinyresnet18']:
-        # Speech and Tiny-ImageNet use GenericFedTA
-        return GenericFedTA(base, args.num_classes, num_ie=num_ie)
-    else:
-        # Image datasets (ResNet) use ResNetFedTA
-        return ResNetFedTA(base, args.num_classes, num_ie=num_ie)
+    return FedTAWrapper(
+        base=base,
+        num_classes=args.num_classes,
+        num_ie=getattr(args, 'num_ie', 10),
+        num_ta=getattr(args, 'num_ta', 100),
+        topn=getattr(args, 'fedta_topn', 3),
+        alpha=getattr(args, 'fedta_alpha', 0.5),
+        tau=getattr(args, 'fedta_tau', 0.1),
+    )

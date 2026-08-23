@@ -2011,3 +2011,190 @@ class LocalUpdateMOON(object):
             epoch_loss.append(sum(batch_loss) / len(batch_loss))
 
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
+
+
+def _unwrap_module(net):
+    return net.module if hasattr(net, 'module') else net
+
+
+def _is_fedta_wrapper(net):
+    real = _unwrap_module(net)
+    return hasattr(real, 'ie_bank') and hasattr(real, 'tail_anchors')
+
+
+class LocalUpdateFedTA(object):
+    """
+    FedTA client with two-stage local training:
+      Stage 1: Input Enhancement (IE) + head
+      Stage 2: Tail Anchor (TA) + head with global prototype contrastive loss
+    """
+
+    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
+        self.args = args
+        self.loss_func = nn.CrossEntropyLoss()
+        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
+        self.task = task
+        self.num_classes = args.num_classes
+
+        self.lambda1 = getattr(args, 'fedta_lambda1', 0.1)
+        self.lambda2 = getattr(args, 'fedta_lambda2', 0.1)
+        self.lambda3 = getattr(args, 'fedta_lambda3', 0.01)
+        self.tau_c = getattr(args, 'fedta_tau_c', 0.1)
+        self.wd = getattr(args, 'fedta_wd', 5e-4)
+
+        stage1 = getattr(args, 'fedta_stage1_ep', 0)
+        self.stage1_ep = stage1 if stage1 > 0 else max(1, args.local_ep // 2)
+        self.stage2_ep = max(1, args.local_ep - self.stage1_ep)
+
+    def _head_params(self, real):
+        prefixes = real._head_param_names()
+        params = []
+        for name, param in real.base.named_parameters():
+            if name in prefixes:
+                params.append(param)
+        return params
+
+    def _run_stage(self, net, optimizer, global_prototypes, alpha, use_ta, num_epochs):
+        device = self.args.device
+        epoch_loss = []
+
+        G = None
+        valid_mask = None
+        if global_prototypes is not None:
+            G = global_prototypes.to(device)
+            valid_mask = G.norm(dim=1) > 1e-6
+
+        for _ in range(num_epochs):
+            batch_loss = []
+            for images, labels in self.ldr_train:
+                images, labels = images.to(device), labels.to(device)
+                optimizer.zero_grad()
+
+                logits, f_ta = net(images, returnFeature=True, alpha=alpha, use_ta=use_ta)
+                loss = self.loss_func(logits, labels)
+
+                if use_ta and G is not None and valid_mask is not None:
+                    sample_mask = valid_mask[labels]
+                    if sample_mask.any():
+                        f_norm = f_ta[sample_mask]
+                        y_valid = labels[sample_mask]
+                        logits_c = torch.mm(f_norm, G.t()) / self.tau_c
+                        logits_c[:, ~valid_mask] = -1e9
+                        l_cons = self.loss_func(logits_c, y_valid)
+                        loss = loss + self.lambda2 * l_cons
+                    l_key = _unwrap_module(net).ta_key_loss()
+                    loss = loss + self.lambda3 * l_key
+                else:
+                    l_key = _unwrap_module(net).ie_key_loss()
+                    loss = loss + self.lambda1 * l_key
+
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'], max_norm=5.0)
+                optimizer.step()
+                batch_loss.append(loss.item())
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+
+        return sum(epoch_loss) / len(epoch_loss)
+
+    def _compute_prototypes(self, net, device):
+        net.eval()
+        class_sums = {}
+        class_counts = {}
+
+        with torch.no_grad():
+            for images, labels in self.ldr_train:
+                images, labels = images.to(device), labels.to(device)
+                _, f_ta = net(images, returnFeature=True, use_ta=True)
+                for y in labels.unique():
+                    y_val = int(y.item())
+                    mask = labels == y
+                    if mask.sum() == 0:
+                        continue
+                    proto = f_ta[mask].mean(dim=0)
+                    class_sums[y_val] = class_sums.get(y_val, 0) + proto
+                    class_counts[y_val] = class_counts.get(y_val, 0) + mask.sum().item()
+
+        prototypes = {}
+        proto_counts = {}
+        for y_val, summed in class_sums.items():
+            proto = summed / class_counts[y_val]
+            proto = F.normalize(proto.unsqueeze(0), p=2, dim=1).squeeze(0)
+            prototypes[y_val] = proto.cpu()
+            proto_counts[y_val] = class_counts[y_val]
+        return prototypes, proto_counts
+
+    def train(self, net, global_prototypes=None, ie_state=None, ta_state=None,
+              lr=None, round_idx=0, idx=-1, local_eps=None):
+        if not _is_fedta_wrapper(net):
+            raise ValueError('LocalUpdateFedTA requires a FedTAWrapper model')
+
+        net.train()
+        device = self.args.device
+        lr = lr if lr is not None else self.args.lr
+        real = _unwrap_module(net)
+
+        if ie_state is not None:
+            real.load_state_dict_ie(ie_state)
+        if ta_state is not None:
+            real.load_state_dict_ta(ta_state)
+
+        head_params = self._head_params(real)
+
+        for param in real.parameters():
+            param.requires_grad = False
+        real.ie_bank.requires_grad = True
+        real.ie_keys.requires_grad = True
+        for param in head_params:
+            param.requires_grad = True
+
+        stage1_params = [real.ie_bank, real.ie_keys] + head_params
+        opt1 = torch.optim.SGD(stage1_params, lr=lr, momentum=self.args.momentum, weight_decay=self.wd)
+        loss1 = self._run_stage(net, opt1, global_prototypes=None, alpha=0.0, use_ta=False,
+                                num_epochs=self.stage1_ep)
+
+        real.ie_bank.requires_grad = False
+        real.ie_keys.requires_grad = False
+        real.tail_anchors.requires_grad = True
+        real.ta_keys.requires_grad = True
+        real.logit_scale.requires_grad = True
+
+        stage2_params = [real.tail_anchors, real.ta_keys, real.logit_scale] + head_params
+        opt2 = torch.optim.SGD(stage2_params, lr=lr, momentum=self.args.momentum, weight_decay=self.wd)
+        loss2 = self._run_stage(net, opt2, global_prototypes=global_prototypes,
+                                alpha=real.alpha, use_ta=True, num_epochs=self.stage2_ep)
+
+        prototypes, proto_counts = self._compute_prototypes(net, device)
+        avg_loss = (loss1 + loss2) / 2.0
+        return net.state_dict(), real.state_dict_ie(), real.state_dict_ta(), prototypes, proto_counts, avg_loss
+
+
+class LocalUpdateFedTAWarmup(object):
+    """Standard local update used during FedTA backbone warmup."""
+
+    def __init__(self, args, dataset=None, idxs=None, task=0):
+        self.args = args
+        self.loss_func = nn.CrossEntropyLoss()
+        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
+        self.task = task
+
+    def train(self, net, lr=None, idx=-1, local_eps=None):
+        net.train()
+        lr = lr if lr is not None else self.args.lr
+        local_eps = local_eps or self.args.local_ep
+
+        optimizer = torch.optim.SGD(net.parameters(), lr=lr,
+                                    momentum=self.args.momentum,
+                                    weight_decay=self.args.wd)
+        epoch_loss = []
+        for _ in range(local_eps):
+            batch_loss = []
+            for images, labels in self.ldr_train:
+                images, labels = images.to(self.args.device), labels.to(self.args.device)
+                optimizer.zero_grad()
+                logits = net(images, use_ta=False, alpha=0.0)
+                loss = self.loss_func(logits, labels)
+                loss.backward()
+                optimizer.step()
+                batch_loss.append(loss.item())
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+        return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
