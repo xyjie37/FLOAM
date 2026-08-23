@@ -166,4 +166,5 @@ def get_fedta_model(args):
         topn=getattr(args, 'fedta_topn', 3),
         alpha=getattr(args, 'fedta_alpha', 0.5),
         tau=getattr(args, 'fedta_tau', 0.1),
+        logit_scale=getattr(args, 'fedta_logit_scale', 16.0),
     )

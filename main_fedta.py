@@ -35,27 +35,15 @@ def set_seed(seed):
 
 
 def _fedavg_weights(w_locals):
+    """Average every float tensor; integer buffers are copied from the first client.
+
+    Frozen parameters are identical across clients, so averaging them is a no-op
+    and the same routine works for both the warmup and the FedTA phase.
+    """
     w_avg = copy.deepcopy(w_locals[0])
     for key in w_avg.keys():
-        for i in range(1, len(w_locals)):
-            w_avg[key] = w_avg[key] + w_locals[i][key]
-        w_avg[key] = torch.div(w_avg[key], len(w_locals))
-    return w_avg
-
-
-def _aggregate_fedta_weights(w_locals, ta_agg='fedavg'):
-    """Aggregate head / logit_scale / optional TA; keep backbone from first client."""
-    w_avg = copy.deepcopy(w_locals[0])
-    agg_keys = []
-    for key in w_avg.keys():
-        if '.linear.' in key or key.endswith('.fc.weight') or key.endswith('.fc.bias'):
-            agg_keys.append(key)
-        elif key.endswith('logit_scale'):
-            agg_keys.append(key)
-        elif ta_agg == 'fedavg' and (key.endswith('tail_anchors') or key.endswith('ta_keys')):
-            agg_keys.append(key)
-
-    for key in agg_keys:
+        if not torch.is_floating_point(w_avg[key]):
+            continue
         stacked = torch.stack([w[key].float() for w in w_locals], dim=0)
         w_avg[key] = stacked.mean(dim=0).to(dtype=w_locals[0][key].dtype)
     return w_avg
@@ -277,6 +265,7 @@ if __name__ == '__main__':
     dataset_path = args.datasetpath
     task_num = args.task_num
     warmup_rounds = getattr(args, 'fedta_warmup_rounds', 10)
+    freeze_level = getattr(args, 'fedta_freeze_level', 'partial')
     ta_agg = getattr(args, 'fedta_ta_agg', 'fedavg')
     gamma = getattr(args, 'fedta_gamma', 0.2)
     thr = getattr(args, 'fedta_thr', 0.5)
@@ -323,6 +312,7 @@ if __name__ == '__main__':
     best_acc = None
     best_epoch = None
     results = []
+    client_ta_states = {}
     prev_client_centroids = None
     current_smi = np.nan
     current_tdi = np.nan
@@ -332,6 +322,15 @@ if __name__ == '__main__':
         in_warmup = epoch < warmup_rounds
         print('Round {:3d}, Task: {}, Phase: {}'.format(
             epoch, task, 'warmup' if in_warmup else 'fedta'))
+
+        if not in_warmup and not backbone_frozen:
+            for model in [net_glob] + net_local_list:
+                real = _unwrap_module(model)
+                real.freeze_backbone(level=freeze_level)
+                real.ta_enabled = True
+            backbone_frozen = True
+            print('Entering FedTA phase at round {} (freeze_level={})'.format(
+                epoch, freeze_level))
 
         m = max(int(args.frac * args.num_users), 1)
         idxs_users = np.random.choice(range(args.num_users), m, replace=False)
@@ -352,14 +351,6 @@ if __name__ == '__main__':
                 w_locals.append(_state_to_cpu(w_local))
                 loss_locals.append(loss)
             else:
-                if not backbone_frozen:
-                    real = _unwrap_module(net_glob)
-                    real.freeze_backbone()
-                    for net_local_item in net_local_list:
-                        _unwrap_module(net_local_item).freeze_backbone()
-                    backbone_frozen = True
-                    print('Backbone frozen at round', epoch)
-
                 local = LocalUpdateFedTA(args=args, dataset=dataset_path, idxs=idx, task=task)
                 w_local, ie_state, ta_state, prototypes, proto_counts, loss = local.train(
                     net=net_local,
@@ -372,8 +363,10 @@ if __name__ == '__main__':
                 w_locals.append(_state_to_cpu(w_local))
                 ie_locals.append({k: v.detach().cpu() if torch.is_tensor(v) else v
                                   for k, v in ie_state.items()})
-                ta_locals.append({k: v.detach().cpu() if torch.is_tensor(v) else v
-                                  for k, v in ta_state.items()})
+                ta_cpu = {k: v.detach().cpu() if torch.is_tensor(v) else v
+                          for k, v in ta_state.items()}
+                ta_locals.append(ta_cpu)
+                client_ta_states[idx] = ta_cpu
                 local_protos_list[idx] = prototypes
                 local_counts_list[idx] = proto_counts
                 loss_locals.append(loss)
@@ -383,10 +376,8 @@ if __name__ == '__main__':
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        if in_warmup:
-            w_glob = _fedavg_weights(w_locals)
-        else:
-            w_glob = _aggregate_fedta_weights(w_locals, ta_agg=ta_agg)
+        w_glob = _fedavg_weights(w_locals)
+        if not in_warmup:
             ie_glob = sikf_fuse(
                 server_ie=ie_glob,
                 client_ie_list=ie_locals,
@@ -421,10 +412,15 @@ if __name__ == '__main__':
             real_local = _unwrap_module(net_local_list[i])
             if ie_glob is not None:
                 real_local.load_state_dict_ie(ie_glob)
-            if ta_glob is not None and ta_agg == 'fedavg':
-                real_local.load_state_dict_ta(ta_glob)
+            if ta_agg == 'fedavg':
+                if ta_glob is not None:
+                    real_local.load_state_dict_ta(ta_glob)
+            elif i in client_ta_states:
+                # 'local' ablation: undo the FedAvg over TA keys for this client.
+                real_local.load_state_dict_ta(client_ta_states[i])
             if backbone_frozen:
-                real_local.freeze_backbone()
+                real_local.freeze_backbone(level=freeze_level)
+                real_local.ta_enabled = True
 
         loss_avg = sum(loss_locals) / max(len(loss_locals), 1)
 

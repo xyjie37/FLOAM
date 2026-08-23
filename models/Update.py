@@ -2054,13 +2054,23 @@ class LocalUpdateFedTA(object):
                 params.append(param)
         return params
 
-    def _run_stage(self, net, optimizer, global_prototypes, alpha, use_ta, num_epochs):
+    def _make_optimizer(self, adapter_params, decay_params, lr):
+        """Adapter banks are bias-like, so they are exempt from weight decay."""
+        groups = []
+        if adapter_params:
+            groups.append({'params': adapter_params, 'weight_decay': 0.0})
+        if decay_params:
+            groups.append({'params': decay_params, 'weight_decay': self.wd})
+        return torch.optim.SGD(groups, lr=lr, momentum=self.args.momentum)
+
+    def _run_stage(self, net, optimizer, global_prototypes, stage, num_epochs):
         device = self.args.device
         epoch_loss = []
+        all_params = [p for group in optimizer.param_groups for p in group['params']]
 
         G = None
         valid_mask = None
-        if global_prototypes is not None:
+        if stage == 'ta' and global_prototypes is not None:
             G = global_prototypes.to(device)
             valid_mask = G.norm(dim=1) > 1e-6
 
@@ -2070,26 +2080,24 @@ class LocalUpdateFedTA(object):
                 images, labels = images.to(device), labels.to(device)
                 optimizer.zero_grad()
 
-                logits, f_ta = net(images, returnFeature=True, alpha=alpha, use_ta=use_ta)
+                logits, f_ta = net(images, returnFeature=True)
                 loss = self.loss_func(logits, labels)
 
-                if use_ta and G is not None and valid_mask is not None:
-                    sample_mask = valid_mask[labels]
-                    if sample_mask.any():
-                        f_norm = f_ta[sample_mask]
-                        y_valid = labels[sample_mask]
-                        logits_c = torch.mm(f_norm, G.t()) / self.tau_c
-                        logits_c[:, ~valid_mask] = -1e9
-                        l_cons = self.loss_func(logits_c, y_valid)
-                        loss = loss + self.lambda2 * l_cons
-                    l_key = _unwrap_module(net).ta_key_loss()
-                    loss = loss + self.lambda3 * l_key
+                real = _unwrap_module(net)
+                if stage == 'ta':
+                    if G is not None and valid_mask is not None:
+                        sample_mask = valid_mask[labels]
+                        if sample_mask.any():
+                            logits_c = torch.mm(f_ta[sample_mask], G.t()) / self.tau_c
+                            logits_c[:, ~valid_mask] = -1e9
+                            l_cons = self.loss_func(logits_c, labels[sample_mask])
+                            loss = loss + self.lambda2 * l_cons
+                    loss = loss + self.lambda3 * real.ta_key_loss()
                 else:
-                    l_key = _unwrap_module(net).ie_key_loss()
-                    loss = loss + self.lambda1 * l_key
+                    loss = loss + self.lambda1 * real.ie_key_loss()
 
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'], max_norm=5.0)
+                torch.nn.utils.clip_grad_norm_(all_params, max_norm=5.0)
                 optimizer.step()
                 batch_loss.append(loss.item())
             epoch_loss.append(sum(batch_loss) / len(batch_loss))
@@ -2097,6 +2105,7 @@ class LocalUpdateFedTA(object):
         return sum(epoch_loss) / len(epoch_loss)
 
     def _compute_prototypes(self, net, device):
+        was_training = net.training
         net.eval()
         class_sums = {}
         class_counts = {}
@@ -2104,7 +2113,7 @@ class LocalUpdateFedTA(object):
         with torch.no_grad():
             for images, labels in self.ldr_train:
                 images, labels = images.to(device), labels.to(device)
-                _, f_ta = net(images, returnFeature=True, use_ta=True)
+                _, f_ta = net(images, returnFeature=True)
                 for y in labels.unique():
                     y_val = int(y.item())
                     mask = labels == y
@@ -2121,6 +2130,9 @@ class LocalUpdateFedTA(object):
             proto = F.normalize(proto.unsqueeze(0), p=2, dim=1).squeeze(0)
             prototypes[y_val] = proto.cpu()
             proto_counts[y_val] = class_counts[y_val]
+
+        if was_training:
+            net.train()
         return prototypes, proto_counts
 
     def train(self, net, global_prototypes=None, ie_state=None, ta_state=None,
@@ -2139,29 +2151,33 @@ class LocalUpdateFedTA(object):
             real.load_state_dict_ta(ta_state)
 
         head_params = self._head_params(real)
+        # Deep blocks stay trainable unless the freeze level is 'full'.
+        body_params = real.trainable_backbone_parameters()
 
         for param in real.parameters():
             param.requires_grad = False
-        real.ie_bank.requires_grad = True
-        real.ie_keys.requires_grad = True
-        for param in head_params:
+        for param in head_params + body_params:
             param.requires_grad = True
 
-        stage1_params = [real.ie_bank, real.ie_keys] + head_params
-        opt1 = torch.optim.SGD(stage1_params, lr=lr, momentum=self.args.momentum, weight_decay=self.wd)
-        loss1 = self._run_stage(net, opt1, global_prototypes=None, alpha=0.0, use_ta=False,
-                                num_epochs=self.stage1_ep)
+        # Stage 1: Input Enhancement + head. TA is frozen but stays in the
+        # forward path so the head never sees a shifting feature distribution.
+        real.ie_bank.requires_grad = True
+        real.ie_keys.requires_grad = True
+        opt1 = self._make_optimizer([real.ie_bank, real.ie_keys],
+                                    head_params + body_params, lr)
+        loss1 = self._run_stage(net, opt1, global_prototypes=None,
+                                stage='ie', num_epochs=self.stage1_ep)
 
+        # Stage 2: Tail Anchor + head under the global-prototype contrastive loss.
         real.ie_bank.requires_grad = False
         real.ie_keys.requires_grad = False
         real.tail_anchors.requires_grad = True
         real.ta_keys.requires_grad = True
         real.logit_scale.requires_grad = True
-
-        stage2_params = [real.tail_anchors, real.ta_keys, real.logit_scale] + head_params
-        opt2 = torch.optim.SGD(stage2_params, lr=lr, momentum=self.args.momentum, weight_decay=self.wd)
+        opt2 = self._make_optimizer([real.tail_anchors, real.ta_keys, real.logit_scale],
+                                    head_params + body_params, lr)
         loss2 = self._run_stage(net, opt2, global_prototypes=global_prototypes,
-                                alpha=real.alpha, use_ta=True, num_epochs=self.stage2_ep)
+                                stage='ta', num_epochs=self.stage2_ep)
 
         prototypes, proto_counts = self._compute_prototypes(net, device)
         avg_loss = (loss1 + loss2) / 2.0
@@ -2182,16 +2198,24 @@ class LocalUpdateFedTAWarmup(object):
         lr = lr if lr is not None else self.args.lr
         local_eps = local_eps or self.args.local_ep
 
-        optimizer = torch.optim.SGD(net.parameters(), lr=lr,
-                                    momentum=self.args.momentum,
-                                    weight_decay=self.args.wd)
+        adapters, decay = [], []
+        for name, param in net.named_parameters():
+            if name.endswith(('ie_bank', 'ie_keys', 'tail_anchors', 'ta_keys', 'logit_scale')):
+                adapters.append(param)
+            else:
+                decay.append(param)
+        optimizer = torch.optim.SGD(
+            [{'params': adapters, 'weight_decay': 0.0},
+             {'params': decay, 'weight_decay': self.args.wd}],
+            lr=lr, momentum=self.args.momentum)
+
         epoch_loss = []
         for _ in range(local_eps):
             batch_loss = []
             for images, labels in self.ldr_train:
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
                 optimizer.zero_grad()
-                logits = net(images, use_ta=False, alpha=0.0)
+                logits = net(images)
                 loss = self.loss_func(logits, labels)
                 loss.backward()
                 optimizer.step()

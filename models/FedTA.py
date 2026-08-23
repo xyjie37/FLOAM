@@ -13,7 +13,7 @@ class FedTAWrapper(nn.Module):
     """Wrap a base model with FedTA Input Enhancement and Tail Anchor."""
 
     def __init__(self, base, num_classes, num_ie=10, num_ta=100,
-                 topn=3, alpha=0.5, tau=0.1):
+                 topn=3, alpha=0.5, tau=0.1, logit_scale=16.0):
         super().__init__()
         self.base = base
         self.num_classes = num_classes
@@ -23,6 +23,9 @@ class FedTAWrapper(nn.Module):
         self.alpha = alpha
         self.tau = tau
         self.backbone_frozen = False
+        self.freeze_level = 'none'
+        # TA stays off during warmup so training and evaluation see the same features.
+        self.ta_enabled = False
 
         self.model_type = self._detect_model_type()
         self.stem_channels = self._get_stem_channels()
@@ -33,14 +36,15 @@ class FedTAWrapper(nn.Module):
             self.ie_bank = nn.Parameter(torch.zeros(num_ie, self.stem_channels))
         else:
             self.ie_bank = nn.Parameter(torch.zeros(num_ie, self.stem_channels, 1, 1))
-        self.ie_keys = nn.Parameter(torch.randn(num_ie, self.stem_channels) * 0.01)
+        self.ie_keys = nn.Parameter(F.normalize(torch.randn(num_ie, self.stem_channels), dim=1))
 
-        # Tail Anchor bank (independent of num_classes)
-        self.tail_anchors = nn.Parameter(torch.randn(num_ta, self.feat_dim) * 0.01)
-        self.ta_keys = nn.Parameter(torch.randn(num_ta, self.feat_dim) * 0.01)
+        # Tail Anchor bank (independent of num_classes). Zero-init keeps the
+        # residual mixing an exact identity until the anchors are trained.
+        self.tail_anchors = nn.Parameter(torch.zeros(num_ta, self.feat_dim))
+        self.ta_keys = nn.Parameter(F.normalize(torch.randn(num_ta, self.feat_dim), dim=1))
 
         # Temperature-scaled classifier on unit-norm features
-        self.logit_scale = nn.Parameter(torch.tensor(10.0))
+        self.logit_scale = nn.Parameter(torch.tensor(float(logit_scale)))
 
         self._last_ie_query = None
         self._last_ie_indices = None
@@ -81,13 +85,29 @@ class FedTAWrapper(nn.Module):
             return real.backbone.fc.in_features
         return 512
 
-    def _backbone_param_prefixes(self):
+    def _backbone_param_prefixes(self, level='full'):
+        """Prefixes of base parameters frozen at the given level."""
+        if level == 'none':
+            return []
+
         if self.model_type == 'text':
-            return ['embedding', 'conv1', 'conv2', 'conv3', 'dropout']
+            if level == 'partial':
+                return ['embedding']
+            return ['embedding', 'conv1', 'conv2', 'conv3']
+
         real = self._real_base()
         if hasattr(real, 'backbone'):
+            if level == 'partial':
+                return ['backbone.conv1', 'backbone.bn1', 'backbone.layer1', 'backbone.layer2']
             return ['backbone']
+
+        if level == 'partial':
+            return ['conv1', 'bn1', 'layer1', 'layer2']
         return ['conv1', 'bn1', 'layer1', 'layer2', 'layer3', 'layer4', 'avgpool']
+
+    def _is_frozen_name(self, name):
+        prefixes = self._backbone_param_prefixes(self.freeze_level)
+        return any(name == pref or name.startswith(pref + '.') for pref in prefixes)
 
     def _head_param_names(self):
         names = []
@@ -200,18 +220,21 @@ class FedTAWrapper(nn.Module):
     # Tail Anchor
     # ------------------------------------------------------------------
     def _select_tail_anchor(self, f_hat):
-        """Top-1 hard TA selection with straight-through estimator."""
+        """Top-1 hard TA selection with straight-through estimator.
+
+        Returns the raw anchor (not renormalized) so that a zero-initialized
+        bank leaves the mixed feature untouched.
+        """
         q_norm = f_hat.detach()
         k_norm = F.normalize(self.ta_keys, p=2, dim=1, eps=1e-6)
         sim = torch.mm(q_norm, k_norm.t())
         idx = sim.argmax(dim=1)
-        self._last_ta_query = f_hat.detach()
+        self._last_ta_query = q_norm
         self._last_ta_index = idx.detach()
 
         ta_hard = self.tail_anchors[idx]
-        ta_soft = torch.mm(F.softmax(sim, dim=1), self.tail_anchors)
-        ta = ta_hard + (ta_soft - ta_soft.detach())
-        return F.normalize(ta, p=2, dim=1, eps=1e-6)
+        ta_soft = torch.mm(F.softmax(sim / self.tau, dim=1), self.tail_anchors)
+        return ta_hard + (ta_soft - ta_soft.detach())
 
     def ta_key_loss(self):
         """Key-query alignment for the selected Tail Anchor."""
@@ -221,16 +244,16 @@ class FedTAWrapper(nn.Module):
         keys = self.ta_keys[self._last_ta_index]
         return F.mse_loss(q, keys)
 
-    def _mix_tail_anchor(self, f_out, alpha=None, use_ta=True):
+    def _mix_tail_anchor(self, f_out, alpha=None, use_ta=None):
         f_hat = F.normalize(f_out, p=2, dim=1, eps=1e-6)
+        use_ta = self.ta_enabled if use_ta is None else use_ta
         if not use_ta:
             return f_hat
         alpha = self.alpha if alpha is None else alpha
         if alpha <= 0:
             return f_hat
         ta = self._select_tail_anchor(f_hat)
-        mixed = (1.0 - alpha) * f_hat + alpha * ta
-        return F.normalize(mixed, p=2, dim=1, eps=1e-6)
+        return F.normalize(f_hat + alpha * ta, p=2, dim=1, eps=1e-6)
 
     # ------------------------------------------------------------------
     # Public forward API
@@ -247,7 +270,7 @@ class FedTAWrapper(nn.Module):
             x_stem = enhanced
         return self._backbone_forward(x_stem)
 
-    def forward(self, x, returnFeature=False, alpha=None, use_ta=True):
+    def forward(self, x, returnFeature=False, alpha=None, use_ta=None):
         f_out = self.extract_backbone_output(x)
         f_ta = self._mix_tail_anchor(f_out, alpha=alpha, use_ta=use_ta)
         logits = self._classifier(f_ta)
@@ -257,7 +280,7 @@ class FedTAWrapper(nn.Module):
 
     def extract_features(self, x):
         """Return TA-mixed normalized features (for metrics / evaluation)."""
-        return self.forward(x, returnFeature=True, use_ta=True)[1]
+        return self.forward(x, returnFeature=True)[1]
 
     def only_liner(self, features):
         return self._classifier(features)
@@ -283,26 +306,49 @@ class FedTAWrapper(nn.Module):
         self._last_ta_query = None
         self._last_ta_index = None
 
-    def freeze_backbone(self):
-        """Freeze backbone parameters and keep BN statistics fixed."""
-        self.backbone_frozen = True
-        prefixes = self._backbone_param_prefixes()
+    def freeze_backbone(self, level='full'):
+        """Freeze backbone parameters at the given level and pin their BN stats.
+
+        ``full``    freeze the whole feature extractor (paper-faithful).
+        ``partial`` freeze only the low-level stem/blocks, keep the deep blocks
+                    trainable so the model retains enough capacity when no
+                    external pre-trained weights are available.
+        ``none``    keep everything trainable.
+        """
+        self.freeze_level = level
+        self.backbone_frozen = level != 'none'
+        prefixes = self._backbone_param_prefixes(level)
         for name, param in self._real_base().named_parameters():
-            if any(name == pref or name.startswith(pref + '.') for pref in prefixes):
-                param.requires_grad = False
+            frozen = any(name == pref or name.startswith(pref + '.') for pref in prefixes)
+            param.requires_grad = not frozen
         self.set_backbone_bn_eval()
 
     def unfreeze_backbone(self):
+        self.freeze_level = 'none'
         self.backbone_frozen = False
         for param in self._real_base().parameters():
             param.requires_grad = True
 
     def set_backbone_bn_eval(self):
+        """Pin BN statistics of frozen blocks only; trainable blocks keep updating."""
         if not self.backbone_frozen:
             return
-        for module in self._real_base().modules():
-            if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)):
+        prefixes = self._backbone_param_prefixes(self.freeze_level)
+        for name, module in self._real_base().named_modules():
+            if not isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                continue
+            if any(name == pref or name.startswith(pref + '.') for pref in prefixes):
                 module.eval()
+
+    def trainable_backbone_parameters(self):
+        """Base parameters that are neither frozen nor part of the head."""
+        head = set(self._head_param_names())
+        params = []
+        for name, param in self._real_base().named_parameters():
+            if name in head or self._is_frozen_name(name):
+                continue
+            params.append(param)
+        return params
 
     def train(self, mode=True):
         super().train(mode)

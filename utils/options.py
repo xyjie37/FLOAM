@@ -112,6 +112,10 @@ def args_parser():
     parser.add_argument('--fedta_gamma', type=float, default=0.2, help='FedTA: global prototype EMA gamma')
     parser.add_argument('--fedta_wd', type=float, default=5e-4, help='FedTA: weight decay')
     parser.add_argument('--fedta_warmup_rounds', type=int, default=10, help='FedTA: FedAvg warmup rounds before freezing backbone')
+    parser.add_argument('--fedta_freeze_level', type=str, default='partial', choices=['full', 'partial', 'none'],
+                        help='FedTA: backbone freezing after warmup. full=whole extractor (paper-faithful, '
+                             'needs a strong pre-trained backbone), partial=stem+layer1/2 only, none=no freezing')
+    parser.add_argument('--fedta_logit_scale', type=float, default=16.0, help='FedTA: initial cosine-classifier scale')
     parser.add_argument('--fedta_stage1_ep', type=int, default=0, help='FedTA: local epochs for IE stage (0=local_ep//2)')
     parser.add_argument('--fedta_ta_agg', type=str, default='fedavg', choices=['fedavg', 'local'], help='FedTA: TA aggregation mode')
     parser.add_argument('--fedta_surrogate_per_class', type=int, default=20, help='FedTA: surrogate samples per class for SIKF')
