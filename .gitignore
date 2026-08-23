@@ -52,6 +52,7 @@ venv.bak/
 checkpoint/
 checkpoints/
 saved_models/
+save/
 logs/
 runs/
 wandb/

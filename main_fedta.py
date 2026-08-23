@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from models.Update import LocalUpdateFedTA, LocalUpdateFedTAWarmup, _unwrap_module
-from models.test import compute_smi_tdi_for_task, test_img, test_img_local_all
+from models.test import compute_smi_tdi_for_task, test_img
 from utils.data_utils import read_client_data
 from utils.options import args_parser
 from utils.train_utils import get_fedta_model
@@ -98,7 +98,7 @@ def build_surrogate_loader(dataset_path, num_users, num_classes, per_class, seed
     Y = torch.tensor(ys, dtype=torch.long)
     if len(X.shape) == 3:
         X = X.unsqueeze(1)
-    return DataLoader(TensorDataset(X, Y), batch_size=batch_size, shuffle=True, drop_last=False)
+    return DataLoader(TensorDataset(X, Y), batch_size=batch_size, shuffle=False, drop_last=False)
 
 
 def sikf_fuse(server_ie, client_ie_list, net, surrogate_loader, device, steps=5, lr=1e-3):
@@ -114,29 +114,30 @@ def sikf_fuse(server_ie, client_ie_list, net, surrogate_loader, device, steps=5,
     was_training = net.training
     net.eval()
 
+    # Cache surrogate batches once so client/server features stay aligned.
+    surrogate_batches = [data.to(device) for data, _ in surrogate_loader]
+    if not surrogate_batches:
+        return _average_ie_states([server_ie] + client_ie_list)
+
     with torch.no_grad():
         ref_features = []
         for kb in client_ie_list:
             real.load_state_dict_ie(kb)
-            feats = []
-            for data, _ in surrogate_loader:
-                data = data.to(device)
-                feats.append(real.extract_backbone_output(data).detach())
-            ref_features.append(torch.cat(feats, dim=0))
+            ref_features.append([
+                real.extract_backbone_output(data).detach() for data in surrogate_batches
+            ])
 
-    target = copy.deepcopy(server_ie)
-    target_bank = target['ie_bank'].clone().requires_grad_(True)
-    target_keys = target['ie_keys'].clone().requires_grad_(True)
+    target_bank = server_ie['ie_bank'].detach().to(device).clone().requires_grad_(True)
+    target_keys = server_ie['ie_keys'].detach().to(device).clone().requires_grad_(True)
     optimizer = torch.optim.Adam([target_bank, target_keys], lr=lr)
 
     for _ in range(steps):
         total_loss = 0.0
         count = 0
-        for data, _ in surrogate_loader:
-            data = data.to(device)
+        for batch_idx, data in enumerate(surrogate_batches):
             feat_i = real.extract_backbone_output(data, ie_bank=target_bank, ie_keys=target_keys)
-            for feat_j in ref_features:
-                total_loss = total_loss + F.mse_loss(feat_i, feat_j.to(device))
+            for client_feats in ref_features:
+                total_loss = total_loss + F.mse_loss(feat_i, client_feats[batch_idx])
                 count += 1
         if count == 0:
             break
@@ -146,8 +147,8 @@ def sikf_fuse(server_ie, client_ie_list, net, surrogate_loader, device, steps=5,
         optimizer.step()
 
     fused = {
-        'ie_bank': target_bank.detach(),
-        'ie_keys': target_keys.detach(),
+        'ie_bank': target_bank.detach().cpu(),
+        'ie_keys': target_keys.detach().cpu(),
     }
     real.load_state_dict_ie(server_ie)
     if was_training:
@@ -223,6 +224,52 @@ def _get_feat_dim(net):
     return real.feat_dim
 
 
+def _clear_fedta_cache(net):
+    real = _unwrap_module(net)
+    if hasattr(real, 'clear_runtime_cache'):
+        real.clear_runtime_cache()
+
+
+def _clone_to_device(net, device):
+    """CPU-safe clone that avoids deepcopy of non-leaf runtime tensors."""
+    _clear_fedta_cache(net)
+    cloned = copy.deepcopy(net)
+    _clear_fedta_cache(cloned)
+    return cloned.to(device)
+
+
+def _state_to_cpu(state_dict):
+    return {k: v.detach().cpu() if torch.is_tensor(v) else v for k, v in state_dict.items()}
+
+
+def _eval_local_all(net_local_list, args, dataset_path, task):
+    """Evaluate each client on GPU one-at-a-time to avoid OOM."""
+    from models.test import test_img_local
+
+    acc_test_local = np.zeros(args.num_users)
+    loss_test_local = np.zeros(args.num_users)
+    sample_per_client = np.zeros(args.num_users)
+
+    for idx in range(args.num_users):
+        _clear_fedta_cache(net_local_list[idx])
+        net = net_local_list[idx].to(args.device)
+        net.eval()
+        try:
+            a, b, data_client = test_img_local(net, dataset_path, task, args, user_idx=idx)
+        finally:
+            _clear_fedta_cache(net)
+            net_local_list[idx] = net.cpu()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        acc_test_local[idx] = a
+        loss_test_local[idx] = b
+        sample_per_client[idx] = data_client
+
+    data_ratio_local = sample_per_client / max(sample_per_client.sum(), 1.0)
+    return acc_test_local.mean(), (acc_test_local * data_ratio_local).sum(), loss_test_local.mean()
+
+
 if __name__ == '__main__':
     args = args_parser()
     set_seed(args.seed)
@@ -238,7 +285,9 @@ if __name__ == '__main__':
     surrogate_per_class = getattr(args, 'fedta_surrogate_per_class', 20)
 
     if args.gpu != '-1':
-        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+        # Respect launcher-provided visibility (e.g. CUDA_VISIBLE_DEVICES=1).
+        if 'CUDA_VISIBLE_DEVICES' not in os.environ:
+            os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     base_dir = './save/{}/{}_num{}_C{}_le{}_bs{}_round{}_m{}_lr{}/{}/'.format(
@@ -268,7 +317,7 @@ if __name__ == '__main__':
     global_prototypes = None
     backbone_frozen = False
 
-    net_local_list = [copy.deepcopy(net_glob) for _ in range(args.num_users)]
+    net_local_list = [copy.deepcopy(net_glob).cpu() for _ in range(args.num_users)]
     results_save_path = os.path.join(base_dir, algo_dir, 'results.csv')
 
     best_acc = None
@@ -295,12 +344,12 @@ if __name__ == '__main__':
         loss_locals = []
 
         for idx in idxs_users:
-            net_local = copy.deepcopy(net_local_list[idx]).to(args.device)
+            net_local = _clone_to_device(net_local_list[idx], args.device)
 
             if in_warmup:
                 local = LocalUpdateFedTAWarmup(args=args, dataset=dataset_path, idxs=idx, task=task)
                 w_local, loss = local.train(net=net_local, lr=args.lr)
-                w_locals.append(w_local)
+                w_locals.append(_state_to_cpu(w_local))
                 loss_locals.append(loss)
             else:
                 if not backbone_frozen:
@@ -320,12 +369,19 @@ if __name__ == '__main__':
                     lr=args.lr,
                     round_idx=epoch,
                 )
-                w_locals.append(w_local)
-                ie_locals.append(ie_state)
-                ta_locals.append(ta_state)
+                w_locals.append(_state_to_cpu(w_local))
+                ie_locals.append({k: v.detach().cpu() if torch.is_tensor(v) else v
+                                  for k, v in ie_state.items()})
+                ta_locals.append({k: v.detach().cpu() if torch.is_tensor(v) else v
+                                  for k, v in ta_state.items()})
                 local_protos_list[idx] = prototypes
                 local_counts_list[idx] = proto_counts
                 loss_locals.append(loss)
+
+            _clear_fedta_cache(net_local)
+            del net_local
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if in_warmup:
             w_glob = _fedavg_weights(w_locals)
@@ -373,7 +429,7 @@ if __name__ == '__main__':
         loss_avg = sum(loss_locals) / max(len(loss_locals), 1)
 
         if (epoch + 1) % args.test_freq == 0:
-            acc_test, _, loss_test = test_img_local_all(
+            acc_test, _, loss_test = _eval_local_all(
                 net_local_list, args, dataset_path, task
             )
             all_acc, all_loss = test_img(
@@ -390,14 +446,27 @@ if __name__ == '__main__':
                 torch.save(net_glob.state_dict(), os.path.join(base_dir, algo_dir, 'best_model.pt'))
 
             if (epoch + 1) % 10 == 0:
-                current_smi, current_tdi, prev_client_centroids = compute_smi_tdi_for_task(
-                    net_local_list=net_local_list,
-                    args=args,
-                    dataset_test=dataset_path,
-                    task=task,
-                    prev_client_centroids=prev_client_centroids,
-                    num_classes=args.num_classes,
-                )
+                # Move clients to GPU one-by-one inside metric collection via temporary list
+                gpu_locals = []
+                try:
+                    for net in net_local_list:
+                        _clear_fedta_cache(net)
+                        gpu_locals.append(net.to(args.device))
+                    current_smi, current_tdi, prev_client_centroids = compute_smi_tdi_for_task(
+                        net_local_list=gpu_locals,
+                        args=args,
+                        dataset_test=dataset_path,
+                        task=task,
+                        prev_client_centroids=prev_client_centroids,
+                        num_classes=args.num_classes,
+                    )
+                finally:
+                    for i, net in enumerate(gpu_locals):
+                        _clear_fedta_cache(net)
+                        net_local_list[i] = net.cpu()
+                    del gpu_locals
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                 tdi_str = 'nan' if np.isnan(current_tdi) else '{:.6f}'.format(current_tdi)
                 print('Task {:3d} SMI: {:.6f}, TDI: {}'.format(task, current_smi, tdi_str))
             else:

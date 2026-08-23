@@ -1,3 +1,4 @@
+import os
 import os.path
 import pandas as pd
 import numpy as np
@@ -8,13 +9,13 @@ import torchvision.transforms as transforms
 from data_util import split_data, save_file
 
 num_client = 20
-num_task = 10  # You can set this to either 5 or 10
+num_task = int(os.environ.get('NUM_TASK', '10'))  # 5 or 10
 num_classes = 100
 alpha = 0.1
 np.random.seed(2266)
 
 # Dataset storage path
-datasetroot_dir = "/root/cifar100"
+datasetroot_dir = os.environ.get('DATASET_ROOT', '/home/jxy/data/cifar100')
 # Output dataset path
 basedir = "./cifar100-dir-{}-task-{}".format(alpha, num_task)
 if not os.path.exists(basedir):

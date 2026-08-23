@@ -183,8 +183,8 @@ class FedTAWrapper(nn.Module):
         enhanced, query, top_idx = self._apply_input_enhancement_with_params(
             x_stem, self.ie_bank, self.ie_keys
         )
-        self._last_ie_query = query
-        self._last_ie_indices = top_idx
+        self._last_ie_query = query.detach()
+        self._last_ie_indices = top_idx.detach()
         return enhanced
 
     def ie_key_loss(self):
@@ -205,8 +205,8 @@ class FedTAWrapper(nn.Module):
         k_norm = F.normalize(self.ta_keys, p=2, dim=1, eps=1e-6)
         sim = torch.mm(q_norm, k_norm.t())
         idx = sim.argmax(dim=1)
-        self._last_ta_query = f_hat
-        self._last_ta_index = idx
+        self._last_ta_query = f_hat.detach()
+        self._last_ta_index = idx.detach()
 
         ta_hard = self.tail_anchors[idx]
         ta_soft = torch.mm(F.softmax(sim, dim=1), self.tail_anchors)
@@ -276,6 +276,13 @@ class FedTAWrapper(nn.Module):
     # ------------------------------------------------------------------
     # Training utilities
     # ------------------------------------------------------------------
+    def clear_runtime_cache(self):
+        """Drop forward caches so deepcopy / CPU-GPU moves stay safe."""
+        self._last_ie_query = None
+        self._last_ie_indices = None
+        self._last_ta_query = None
+        self._last_ta_index = None
+
     def freeze_backbone(self):
         """Freeze backbone parameters and keep BN statistics fixed."""
         self.backbone_frozen = True
