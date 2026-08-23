@@ -996,19 +996,31 @@ class LocalUpdateFedKnow(object):
 
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
     
-# Target
+#TARGET: client-side update (ICCV'23, exemplar-free distillation via a server-side generator)
+def _KD_loss(pred, soft, T):
+    """Old-task knowledge distillation loss (official TARGET implementation)."""
+    pred = torch.log_softmax(pred / T, dim=1)
+    soft = torch.softmax(soft / T, dim=1)
+    return -1 * torch.mul(soft, pred).sum() / pred.shape[0]
+
+
 class LocalUpdateTARGET(object):
-    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False, synthetic_data=None):
+    _KD_DEGENERATE_WARNED = False  # warn once per process when old-class KD is skipped
+
+    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False, syn_loader=None):
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
         self.selected_clients = []
         self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
         self.pretrain = pretrain
-        self.synthetic_data = synthetic_data  # Add synthetic data
+        self.syn_loader = syn_loader  # unlabeled synthetic data from the server-side generator
+        # classes covered by tasks [0, task): the old classes kept by distillation
+        self.old_classes = task * (args.num_classes // args.task_num) if args.task_num > 0 else 0
 
     def train(self, net, teacher_model, lr, idx=-1, local_eps=None):
         net.train()
-        teacher_model.eval()  # Freeze teacher model
+        if teacher_model is not None:
+            teacher_model.eval()  # frozen snapshot of the global model at the last task switch
 
         # Combined optimizer
         optimizer = torch.optim.SGD(net.parameters(), lr=lr,
@@ -1018,58 +1030,60 @@ class LocalUpdateTARGET(object):
         epoch_loss = []
         local_eps = self.args.local_ep if local_eps is None else local_eps
 
+        use_kd = self.syn_loader is not None and teacher_model is not None
+        if use_kd and self.old_classes < 2:
+            # single old class makes the old-class softmax degenerate (e.g. 1 class/task splits)
+            use_kd = False
+            if not LocalUpdateTARGET._KD_DEGENERATE_WARNED:
+                print('[TARGET] old_classes={} (<2): old-class KD degenerates, CE-only local training'.format(self.old_classes))
+                LocalUpdateTARGET._KD_DEGENERATE_WARNED = True
+
         for _ in range(local_eps):
             batch_loss = []
-            
-            if self.synthetic_data is not None:
+
+            if use_kd:
                 # Iterate real and synthetic data together
-                for (real_images, real_labels), (synth_images, _) in zip(self.ldr_train, self.synthetic_data):
-                    # Current task data
-                    real_images, real_labels = real_images.to(self.args.device), real_labels.to(self.args.device)
-                    
-                    # Synthetic data (old tasks)
-                    synth_images = synth_images.to(self.args.device)
-                    
-                    # Forward pass
-                    real_logits = net(real_images)
-                    synth_logits = net(synth_images)
-                    
-                    # Teacher model output
+                for (images, labels), syn_batch in zip(self.ldr_train, self.syn_loader):
+                    images, labels = images.to(self.args.device), labels.to(self.args.device)
+                    syn_images = syn_batch[0].to(self.args.device)
+
+                    # Current task loss (global labels on the full head, FLOAM protocol)
+                    logits = net(images)
+                    ce_loss = self.loss_func(logits, labels)
+
+                    # Old task distillation on synthetic data against the frozen teacher
+                    s_out = net(syn_images)
                     with torch.no_grad():
-                        teacher_logits = teacher_model(synth_images)
-                    
-                    # Compute loss
-                    ce_loss = self.loss_func(real_logits, real_labels)  # Current task loss
-                    kl_loss = nn.KLDivLoss()(F.log_softmax(synth_logits, dim=1),
-                                           F.softmax(teacher_logits, dim=1))  # Old task distillation loss
-                    
-                    total_loss = ce_loss + 0.1 * kl_loss  # Combined loss
-                    
+                        t_out = teacher_model(syn_images)
+                    kd_loss = _KD_loss(s_out[:, :self.old_classes],
+                                       t_out[:, :self.old_classes],
+                                       self.args.target_kd_T)
+
+                    loss = ce_loss + self.args.target_kd * kd_loss
+
                     # Backward pass
                     optimizer.zero_grad()
-                    total_loss.backward()
+                    loss.backward()
                     optimizer.step()
 
-                    batch_loss.append(total_loss.item())
+                    batch_loss.append(loss.item())
             else:
                 # Train with real data only
-                for real_images, real_labels in self.ldr_train:
-                    real_images, real_labels = real_images.to(self.args.device), real_labels.to(self.args.device)
-                    
+                for images, labels in self.ldr_train:
+                    images, labels = images.to(self.args.device), labels.to(self.args.device)
+
                     # Forward pass
-                    real_logits = net(real_images)
-                    
-                    # Compute loss
-                    ce_loss = self.loss_func(real_logits, real_labels)  # Current task loss
-                    
+                    logits = net(images)
+                    loss = self.loss_func(logits, labels)
+
                     # Backward pass
                     optimizer.zero_grad()
-                    ce_loss.backward()
+                    loss.backward()
                     optimizer.step()
 
-                    batch_loss.append(ce_loss.item())
+                    batch_loss.append(loss.item())
 
-            epoch_loss.append(sum(batch_loss)/len(batch_loss))
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
 
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
 

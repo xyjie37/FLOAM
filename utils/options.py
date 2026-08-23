@@ -142,5 +142,26 @@ def args_parser():
                         choices=['client_balanced', 'sample_weighted'],
                         help='Server anchor aggregation: equal per-client vs sample-weighted')
 
+    # TARGET arguments (ICCV'23 exemplar-free distillation, run via main_target.py)
+    parser.add_argument('--target_kd', type=float, default=25.0, help='TARGET: weight of old-task KD loss on synthetic data')
+    parser.add_argument('--target_kd_T', type=float, default=2.0, help='TARGET: temperature of old-task KD loss')
+    parser.add_argument('--target_nz', type=int, default=256, help='TARGET: generator noise dimension')
+    parser.add_argument('--target_ngf', type=int, default=64, help='TARGET: generator feature dimension')
+    parser.add_argument('--target_syn_round', type=int, default=10, help='TARGET: synthesis rounds per task switch')
+    parser.add_argument('--target_g_steps', type=int, default=10, help='TARGET: generator optimization steps per synthesis round')
+    parser.add_argument('--target_kd_steps', type=int, default=400, help='TARGET: student distillation steps per synthesis round (after warmup)')
+    parser.add_argument('--target_warmup', type=int, default=20, help='TARGET: warmup rounds before enabling adversarial loss and student distillation')
+    parser.add_argument('--target_lr_g', type=float, default=0.002, help='TARGET: generator learning rate')
+    parser.add_argument('--target_lr_z', type=float, default=0.01, help='TARGET: noise z learning rate')
+    parser.add_argument('--target_syn_bs', type=int, default=256, help='TARGET: synthesis batch size')
+    parser.add_argument('--target_num_syn', type=int, default=8000, help='TARGET: max number of synthetic images kept in the pool')
+    parser.add_argument('--target_oh', type=float, default=0.5, help='TARGET: weight of CE loss on pseudo labels')
+    parser.add_argument('--target_adv', type=float, default=1.0, help='TARGET: weight of boundary-support (adversarial) loss')
+    parser.add_argument('--target_bn', type=float, default=10.0, help='TARGET: weight of BN statistics matching loss')
+    parser.add_argument('--target_T', type=float, default=20.0, help='TARGET: temperature of student distillation')
+    parser.add_argument('--target_is_maml', type=int, default=1, help='TARGET: 1=FOMAML, 0=REPTILE meta update for the generator')
+    parser.add_argument('--target_bn_mmt', type=float, default=0.9, help='TARGET: momentum of BN statistics in the inversion hook')
+    parser.add_argument('--target_reset_l0', type=int, default=1, help='TARGET: reset generator first layer at ep==120+warmup')
+
     args = parser.parse_args()
     return args
