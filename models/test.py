@@ -10,7 +10,12 @@ from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import pdb
-from utils.data_utils import load_train_data, load_test_data, read_all_test_data
+from utils.data_utils import (
+    load_train_data,
+    load_test_data,
+    read_all_test_data,
+    read_client_data,
+)
 import csv
 
 
@@ -138,6 +143,55 @@ def test_img(net_g, datatest, args, epoch, class_num, save_folder):
     df.to_csv(save_path, index=False)
 
     return accuracy, test_loss
+
+
+def test_global_model_on_task(net_g, dataset, task, args):
+    """Evaluate one global model on one task across all clients.
+
+    Each client's test fragment is traversed without shuffling, then the
+    correct predictions and loss are accumulated before computing the task
+    result.  This gives a sample-weighted task accuracy without consuming the
+    random state that controls subsequent training data order.
+    """
+    was_training = net_g.training
+    net_g.eval()
+    test_loss = 0.0
+    correct = 0
+    sample_count = 0
+
+    with torch.no_grad():
+        for user_idx in range(args.num_users):
+            client_test_data = read_client_data(
+                dataset, user_idx, task, is_train=False)
+            evaluation_generator = torch.Generator()
+            evaluation_generator.manual_seed(0)
+            data_loader = DataLoader(
+                client_test_data,
+                batch_size=args.bs,
+                drop_last=False,
+                shuffle=False,
+                generator=evaluation_generator,
+            )
+
+            for data, target in data_loader:
+                data = data.to(args.device)
+                target = target.to(args.device)
+                log_probs = net_g(data)
+                test_loss += F.cross_entropy(
+                    log_probs, target, reduction='sum').item()
+                prediction = log_probs.argmax(dim=1)
+                correct += prediction.eq(target).sum().item()
+                sample_count += target.size(0)
+
+    if was_training:
+        net_g.train()
+
+    if sample_count == 0:
+        raise ValueError('No test samples found for task {}'.format(task))
+
+    accuracy = 100.0 * correct / sample_count
+    average_loss = test_loss / sample_count
+    return accuracy, average_loss, sample_count
 
 def test_img_local(net_g, dataset, task, args, user_idx=-1, idxs=None, return_features=False):
     net_g.eval()

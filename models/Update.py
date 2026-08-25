@@ -10,6 +10,7 @@ from torch.optim import Optimizer
 #from transformers import CLIPProcessor, CLIPModel
 
 from utils.data_utils import load_train_data, load_test_data
+from utils.fedproc_validation import preserve_rng_state
 from torch.utils.data import DataLoader
 import numpy as np
 from sklearn.cluster import KMeans
@@ -18,7 +19,11 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 from collections import defaultdict
 import torch.optim as optim
 from scipy.stats import wasserstein_distance
-from cvxopt import matrix, solvers
+try:
+    from cvxopt import matrix, solvers
+except ImportError:
+    matrix = None
+    solvers = None
 from collections import Counter
 import torchvision.transforms.functional as TF
 from collections import OrderedDict
@@ -764,6 +769,196 @@ class LocalUpdate(object):
             epoch_loss.append(sum(batch_loss)/len(batch_loss))
 
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
+
+
+class LocalUpdateFedProc(object):
+    """FedProc client training with global-prototype contrastive loss."""
+
+    def __init__(self, args, dataset=None, idxs=None, task=0):
+        self.args = args
+        self.loss_func = nn.CrossEntropyLoss()
+        self.selected_clients = []
+        self.ldr_train = load_train_data(
+            dataset, idxs, task, batch_size=self.args.local_bs
+        )
+
+    @staticmethod
+    def alpha_for_round(global_round, total_rounds):
+        """Return the paper schedule alpha_t = 1 - t / T."""
+        if total_rounds <= 0:
+            raise ValueError("total_rounds must be positive.")
+        if global_round < 0 or global_round >= total_rounds:
+            raise ValueError(
+                "global_round must satisfy 0 <= global_round < total_rounds."
+            )
+        return 1.0 - float(global_round) / float(total_rounds)
+
+    @staticmethod
+    def _global_prototype_loss(z, labels, global_prototypes):
+        """Return GPC loss, or None when the batch has no valid positive prototype."""
+        if not global_prototypes:
+            return None
+
+        prototype_items = []
+        for raw_label, prototype in global_prototypes.items():
+            if prototype is None:
+                continue
+            class_label = int(raw_label)
+            prototype = torch.as_tensor(
+                prototype, device=z.device, dtype=z.dtype
+            ).detach().reshape(-1)
+            if prototype.numel() != z.size(1):
+                raise ValueError(
+                    "Global prototype dimension mismatch for class "
+                    f"{class_label}: expected {z.size(1)}, got {prototype.numel()}."
+                )
+            prototype_items.append((class_label, prototype))
+
+        if not prototype_items:
+            return None
+
+        prototype_items.sort(key=lambda item: item[0])
+        prototype_labels = [item[0] for item in prototype_items]
+        prototype_matrix = torch.stack([item[1] for item in prototype_items])
+        label_to_column = {
+            class_label: column
+            for column, class_label in enumerate(prototype_labels)
+        }
+
+        batch_labels = [int(label) for label in labels.detach().cpu().tolist()]
+        valid_mask = torch.tensor(
+            [label in label_to_column for label in batch_labels],
+            device=z.device,
+            dtype=torch.bool,
+        )
+        if not valid_mask.any().item():
+            return None
+
+        valid_z = z[valid_mask]
+        target_columns = torch.tensor(
+            [label_to_column[label] for label in batch_labels if label in label_to_column],
+            device=z.device,
+            dtype=torch.long,
+        )
+
+        similarities = F.cosine_similarity(
+            valid_z.unsqueeze(1), prototype_matrix.unsqueeze(0), dim=2
+        )
+        return F.cross_entropy(similarities, target_columns)
+
+    def compute_local_prototypes(self, net, preserve_rng=False):
+        """Recompute class means with the final local model in eval mode."""
+        prototype_sums = {}
+        prototype_counts = {}
+        with preserve_rng_state(preserve_rng):
+            net.eval()
+            with torch.no_grad():
+                for images, labels in self.ldr_train:
+                    images = images.to(self.args.device)
+                    labels = labels.to(self.args.device)
+                    _, z = net(images, returnFeature=True)
+
+                    for label in labels.unique():
+                        class_label = int(label.item())
+                        class_features = z[labels == label]
+                        feature_sum = class_features.sum(dim=0).detach().cpu()
+                        if class_label not in prototype_sums:
+                            prototype_sums[class_label] = feature_sum
+                            prototype_counts[class_label] = class_features.size(0)
+                        else:
+                            prototype_sums[class_label] += feature_sum
+                            prototype_counts[class_label] += class_features.size(0)
+
+        return {
+            class_label: prototype_sums[class_label] / prototype_counts[class_label]
+            for class_label in prototype_sums
+        }
+
+    def train(
+            self, net, lr, global_prototypes, global_round, total_rounds,
+            idx=-1, local_eps=None, alpha_override=None,
+            compute_prototypes=True, preserve_prototype_rng=False):
+        alpha_t = self.alpha_for_round(global_round, total_rounds)
+        if alpha_override is not None:
+            alpha_t = float(alpha_override)
+            if not 0.0 <= alpha_t <= 1.0:
+                raise ValueError("alpha_override must be in [0, 1].")
+        net.train()
+        optimizer = torch.optim.SGD(
+            net.parameters(),
+            lr=lr,
+            momentum=self.args.momentum,
+            weight_decay=self.args.wd,
+        )
+
+        if local_eps is None:
+            local_eps = self.args.local_ep
+
+        sums = {'total': 0.0, 'ce': 0.0, 'gpc': 0.0,
+                'weighted_ce': 0.0, 'weighted_gpc': 0.0}
+        batch_count = 0
+        gpc_valid_batch_count = 0
+        gpc_fallback_batch_count = 0
+        for _ in range(local_eps):
+            epoch_batch_count = 0
+            for images, labels in self.ldr_train:
+                images = images.to(self.args.device)
+                labels = labels.to(self.args.device)
+                logits, _, z = net(images, return_all=True)
+
+                ce_loss = self.loss_func(logits, labels)
+                gpc_loss = self._global_prototype_loss(
+                    z, labels, global_prototypes
+                )
+                if gpc_loss is None:
+                    weighted_gpc = ce_loss.new_zeros(())
+                    weighted_ce = ce_loss
+                    loss = ce_loss
+                    gpc_fallback_batch_count += 1
+                else:
+                    weighted_gpc = alpha_t * gpc_loss
+                    weighted_ce = (1.0 - alpha_t) * ce_loss
+                    loss = weighted_gpc + weighted_ce
+                    gpc_valid_batch_count += 1
+                    sums['gpc'] += float(gpc_loss.detach().item())
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                sums['total'] += float(loss.detach().item())
+                sums['ce'] += float(ce_loss.detach().item())
+                sums['weighted_ce'] += float(weighted_ce.detach().item())
+                sums['weighted_gpc'] += float(weighted_gpc.detach().item())
+                batch_count += 1
+                epoch_batch_count += 1
+
+            if not epoch_batch_count:
+                raise ValueError("FedProc client received an empty local dataset.")
+
+        if not batch_count:
+            raise ValueError("local_eps must be positive.")
+
+        local_prototypes = (
+            self.compute_local_prototypes(
+                net, preserve_rng=preserve_prototype_rng)
+            if compute_prototypes else {}
+        )
+        average_loss = sums['total'] / batch_count
+        self.last_training_metrics = {
+            'alpha_t': float(alpha_t),
+            'average_total_loss': float(average_loss),
+            'average_ce_loss': sums['ce'] / batch_count,
+            'average_gpc_loss': (
+                sums['gpc'] / gpc_valid_batch_count
+                if gpc_valid_batch_count else None
+            ),
+            'average_weighted_ce': sums['weighted_ce'] / batch_count,
+            'average_weighted_gpc': sums['weighted_gpc'] / batch_count,
+            'gpc_valid_batch_count': int(gpc_valid_batch_count),
+            'gpc_fallback_batch_count': int(gpc_fallback_batch_count),
+            'local_prototype_class_count': int(len(local_prototypes)),
+        }
+        return net.state_dict(), average_loss, local_prototypes
     
 # FedProx
 
@@ -817,6 +1012,10 @@ class LocalUpdateFedProx(object):
 # FedKnow
 class LocalUpdateFedKnow(object):
     def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
+        if solvers is None:
+            raise ImportError(
+                "LocalUpdateFedKnow requires the optional dependency 'cvxopt'."
+            )
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
         self.selected_clients = []

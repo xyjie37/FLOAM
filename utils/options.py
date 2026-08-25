@@ -85,6 +85,31 @@ def args_parser():
     parser.add_argument('--mode', type=str, default = 'mode1')
     parser.add_argument('--m', type=int, default = '20')       #20 for cifar100
     parser.add_argument('--z_dim', type=int, default=100, help="Generator input dimension")
+    parser.add_argument(
+        '--fedproc_z_dim',
+        type=int,
+        default=256,
+        help='FedProc projection output dimension (default: 256)',
+    )
+    parser.add_argument(
+        '--fedproc_validation_logging',
+        action='store_true',
+        help=(
+            'Write detailed FedProc loss, model/prototype shape, and '
+            'prototype-consistency records for correctness verification.'
+        ),
+    )
+    parser.add_argument(
+        '--fedproc_ablation',
+        type=str,
+        default='none',
+        choices=('none', 'ce_only', 'no_proto_alpha0'),
+        help=(
+            'FedProc correctness ablation. ce_only keeps prototype '
+            'communication but forces alpha=0; no_proto_alpha0 also '
+            'disables prototype bootstrap and communication.'
+        ),
+    )
     parser.add_argument('--g_lr', type=float, default=1e-4, help="Generator learning rate")
     parser.add_argument('--lambda1', type=float, default=0.1, help="Boundary loss weight")
     parser.add_argument('--lambda2', type=float, default=0.01, help="BatchNorm loss weight")
