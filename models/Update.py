@@ -996,17 +996,16 @@ class LocalUpdateFedKnow(object):
 
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
     
-#TARGET: client-side update (ICCV'23, exemplar-free distillation via a server-side generator)
+#TARGET: client-side update, adapted from ICCV'23 TARGET to FLOAM domain-IL
+# (fixed label space, task-wise distribution shift; not class-incremental).
 def _KD_loss(pred, soft, T):
-    """Old-task knowledge distillation loss (official TARGET implementation)."""
+    """Knowledge distillation loss (official TARGET implementation)."""
     pred = torch.log_softmax(pred / T, dim=1)
     soft = torch.softmax(soft / T, dim=1)
     return -1 * torch.mul(soft, pred).sum() / pred.shape[0]
 
 
 class LocalUpdateTARGET(object):
-    _KD_DEGENERATE_WARNED = False  # warn once per process when old-class KD is skipped
-
     def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False, syn_loader=None):
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
@@ -1014,15 +1013,12 @@ class LocalUpdateTARGET(object):
         self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
         self.pretrain = pretrain
         self.syn_loader = syn_loader  # unlabeled synthetic data from the server-side generator
-        # classes covered by tasks [0, task): the old classes kept by distillation
-        self.old_classes = task * (args.num_classes // args.task_num) if args.task_num > 0 else 0
 
     def train(self, net, teacher_model, lr, idx=-1, local_eps=None):
         net.train()
         if teacher_model is not None:
             teacher_model.eval()  # frozen snapshot of the global model at the last task switch
 
-        # Combined optimizer
         optimizer = torch.optim.SGD(net.parameters(), lr=lr,
                                    momentum=self.args.momentum,
                                    weight_decay=self.args.wd)
@@ -1030,53 +1026,46 @@ class LocalUpdateTARGET(object):
         epoch_loss = []
         local_eps = self.args.local_ep if local_eps is None else local_eps
 
-        use_kd = self.syn_loader is not None and teacher_model is not None
-        if use_kd and self.old_classes < 2:
-            # single old class makes the old-class softmax degenerate (e.g. 1 class/task splits)
-            use_kd = False
-            if not LocalUpdateTARGET._KD_DEGENERATE_WARNED:
-                print('[TARGET] old_classes={} (<2): old-class KD degenerates, CE-only local training'.format(self.old_classes))
-                LocalUpdateTARGET._KD_DEGENERATE_WARNED = True
+        use_kd = self.syn_loader is not None and teacher_model is not None and len(self.syn_loader) > 0
 
         for _ in range(local_eps):
             batch_loss = []
 
             if use_kd:
-                # Iterate real and synthetic data together
-                for (images, labels), syn_batch in zip(self.ldr_train, self.syn_loader):
+                syn_iter = iter(self.syn_loader)
+                for images, labels in self.ldr_train:
                     images, labels = images.to(self.args.device), labels.to(self.args.device)
+                    try:
+                        syn_batch = next(syn_iter)
+                    except StopIteration:
+                        syn_iter = iter(self.syn_loader)
+                        syn_batch = next(syn_iter)
                     syn_images = syn_batch[0].to(self.args.device)
 
-                    # Current task loss (global labels on the full head, FLOAM protocol)
+                    # Current-task CE on the full fixed label space
                     logits = net(images)
                     ce_loss = self.loss_func(logits, labels)
 
-                    # Old task distillation on synthetic data against the frozen teacher
+                    # Distill the previous-task global distribution on synthetic data
                     s_out = net(syn_images)
                     with torch.no_grad():
                         t_out = teacher_model(syn_images)
-                    kd_loss = _KD_loss(s_out[:, :self.old_classes],
-                                       t_out[:, :self.old_classes],
-                                       self.args.target_kd_T)
+                    kd_loss = _KD_loss(s_out, t_out, self.args.target_kd_T)
 
                     loss = ce_loss + self.args.target_kd * kd_loss
 
-                    # Backward pass
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
 
                     batch_loss.append(loss.item())
             else:
-                # Train with real data only
                 for images, labels in self.ldr_train:
                     images, labels = images.to(self.args.device), labels.to(self.args.device)
 
-                    # Forward pass
                     logits = net(images)
                     loss = self.loss_func(logits, labels)
 
-                    # Backward pass
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()

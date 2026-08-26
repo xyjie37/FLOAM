@@ -5,16 +5,21 @@
 """
 TARGET: Federated Class-Continual Learning via Exemplar-Free Distillation (ICCV 2023)
 
-Baseline reproduction for the FLOAM benchmark. The runtime protocol (task schedule,
-rounds, aggregation, evaluation) is identical to main_fedavg.py; TARGET adds:
+Baseline for the FLOAM benchmark (fixed label space, task-wise distribution shift;
+NOT class-incremental). The runtime protocol (task schedule, rounds, aggregation,
+evaluation) is identical to main_fedavg.py; TARGET adds:
 1. Server-side generator-based data synthesis at each task switch (data_generation),
    ported from the official implementation (zj-jayzhang/Federated-Class-Continual-Learning).
-2. Client-side old-class knowledge distillation on the synthetic data against the
-   frozen global model snapshot of the previous task (LocalUpdateTARGET in models/Update.py).
+2. Client-side knowledge distillation on the synthetic data against the frozen
+   global model snapshot of the previous task (LocalUpdateTARGET in models/Update.py).
 
-Adaptations w.r.t. the official code:
-- kornia augmentation removed: the FLOAM npz training data is pre-normalized without
-  augmentation, so only the dataset normalization is applied to generator outputs;
+Domain-IL adaptations vs the official CIL code:
+- generator samples labels over the full fixed label space (not a growing old-class set);
+- client KD is on the full classifier (not sliced to old-class logits);
+- current-task CE stays full-head with global labels;
+- synthesis runs on every task switch after the first one, including wrap-around to task 0;
+- kornia augmentation removed: FLOAM npz data is pre-normalized without augmentation,
+  so only dataset normalization is applied to generator outputs;
 - the synthetic image pool is kept in memory (normalized tensors) instead of PNG files;
 - devices are passed explicitly instead of hardcoded .cuda().
 """
@@ -330,14 +335,15 @@ def kd_train(args, student, teacher, syn_dataset, criterion, optimizer, device):
         optimizer.step()
 
 
-def data_generation(args, teacher, seen_classes, device):
-    """Official TARGET data generation at each task switch.
+def data_generation(args, teacher, num_classes, device):
+    """TARGET data generation at each task switch.
 
-    A fresh generator is meta-learned against the frozen global model (teacher);
-    after warmup rounds a randomly re-initialized student is distilled from the
-    teacher on the accumulated synthetic pool (inactive with the default
-    syn_round=10 < warmup=20, matching the official CIFAR-100 configuration).
-    Returns a TensorDataset of normalized synthetic images over seen_classes.
+    A fresh generator is meta-learned against the frozen global model (teacher)
+    so that synthetic images match the previous-task global distribution over the
+    full fixed label space. After warmup rounds a randomly re-initialized student
+    is distilled from the teacher on the accumulated synthetic pool (inactive with
+    the default syn_round=10 < warmup=20, matching the official CIFAR-100 config).
+    Returns a TensorDataset of normalized synthetic images.
     """
     img_size, mean, std = DATASET_META[args.dataset]
     generator = Generator(nz=args.target_nz, ngf=args.target_ngf, img_size=img_size, nc=3)
@@ -345,7 +351,7 @@ def data_generation(args, teacher, seen_classes, device):
     student.apply(weight_init)
 
     synthesizer = GlobalSynthesizer(args, teacher=teacher, student=student, generator=generator,
-                                    num_classes=seen_classes, device=device, mean=mean, std=std)
+                                    num_classes=num_classes, device=device, mean=mean, std=std)
 
     criterion = KLDiv(T=args.target_T)
     optimizer = torch.optim.SGD(student.parameters(), lr=0.2, weight_decay=0.0001,
@@ -361,8 +367,8 @@ def data_generation(args, teacher, seen_classes, device):
 
     synthesizer.remove_hooks()
     syn_dataset = synthesizer.get_pool_dataset()
-    print('[TARGET] data generation finished: {} synthetic images over {} seen classes'.format(
-        len(syn_dataset), seen_classes))
+    print('[TARGET] data generation finished: {} synthetic images over {} classes'.format(
+        len(syn_dataset), num_classes))
 
     del student, generator, synthesizer
     gc.collect()
@@ -445,19 +451,18 @@ if __name__ == '__main__':
         task=(iter//10)%task_num  # Task switch every 10 rounds (FLOAM protocol)
         print('Current task: ', task)
 
-        # Task switch: freeze the current global model as teacher and synthesize
-        # old-class data with a freshly meta-learned generator
+        # Task switch: freeze the current global model as teacher and invert the
+        # previous-task global distribution over the full label space.
         if task != prev_task:
-            classes_per_task = args.num_classes // task_num
-            old_classes = task * classes_per_task
-            if old_classes >= 2:
-                print('[TARGET] Task switch -> {}: data generation over {} old classes'.format(task, old_classes))
-                teacher_model = copy.deepcopy(net_glob).to(args.device)
-                syn_pool = data_generation(args, teacher_model, old_classes, args.device)
-                syn_loader = DataLoader(syn_pool, batch_size=args.local_bs, shuffle=True)
-            else:
-                # first task (or wrap-around to task 0): plain FedAvg phase
+            if prev_task is None:
+                # first task only: no previous distribution to replay
                 teacher_model, syn_loader = None, None
+            else:
+                print('[TARGET] Task switch {} -> {}: data generation over {} classes'.format(
+                    prev_task, task, args.num_classes))
+                teacher_model = copy.deepcopy(net_glob).to(args.device)
+                syn_pool = data_generation(args, teacher_model, args.num_classes, args.device)
+                syn_loader = DataLoader(syn_pool, batch_size=args.local_bs, shuffle=True)
         prev_task = task
 
         # Local Updates with TARGET
