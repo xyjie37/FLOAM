@@ -131,6 +131,11 @@ def args_parser():
     parser.add_argument('--moon_mu', type=float, default=1.0, help='MOON: weight of model-contrastive loss')
     parser.add_argument('--moon_tau', type=float, default=0.5, help='MOON: temperature of model-contrastive loss')
 
+    # FedNH arguments (AAAI 2023, Dai et al.)
+    parser.add_argument('--fednh_rho', type=float, default=0.9, help='FedNH: prototype smoothing coefficient rho in (0,1)')
+    parser.add_argument('--fednh_s', type=float, default=30.0, help='FedNH: cosine-classifier scaling s')
+    parser.add_argument('--fednh_fix_scaling', action='store_true', help='FedNH: freeze scaling s instead of learning it')
+
     # FLOAM ablation flags (each isolates ONE component; default = full FLOAM)
     parser.add_argument('--ot_cost', type=str, default='anchor_geometry',
                         choices=['anchor_geometry', 'uniform'],

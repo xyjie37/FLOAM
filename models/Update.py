@@ -2225,3 +2225,186 @@ class LocalUpdateFedTAWarmup(object):
                 batch_loss.append(loss.item())
             epoch_loss.append(sum(batch_loss) / len(batch_loss))
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
+
+
+# FedNH (Tackling Data Heterogeneity in Federated Learning with Class Prototypes, AAAI 2023)
+def _fednh_unwrap(net):
+    return net.module if hasattr(net, 'module') else net
+
+
+class FedNHWrapper(nn.Module):
+    """
+    Cosine classifier on top of an existing FLOAM backbone.
+
+    Prototypes occupy the original linear/fc weight, initialized as orthonormal
+    rows and frozen during local SGD. Features and prototypes are L2-normalized,
+    and logits are s * <f(x), W_y> as in FedNH Eq. (2).
+    """
+
+    def __init__(self, base, num_classes, scaling=30.0, fix_scaling=False):
+        super(FedNHWrapper, self).__init__()
+        self.base = base
+        self.scaling = nn.Parameter(
+            torch.tensor(float(scaling)), requires_grad=(not fix_scaling)
+        )
+        self._init_orthogonal_prototypes(num_classes)
+        self._freeze_head()
+
+    def _get_head(self):
+        if hasattr(self.base, 'linear'):
+            return self.base.linear
+        if hasattr(self.base, 'fc'):
+            return self.base.fc
+        raise AttributeError('Wrapped model must expose linear or fc classifier head')
+
+    def _init_orthogonal_prototypes(self, num_classes):
+        head = self._get_head()
+        if head.weight.size(0) != num_classes:
+            raise ValueError(
+                'Classifier out_features ({}) != num_classes ({})'.format(
+                    head.weight.size(0), num_classes
+                )
+            )
+        weight = torch.empty_like(head.weight.data)
+        nn.init.orthogonal_(weight)
+        weight = F.normalize(weight, p=2, dim=1)
+        with torch.no_grad():
+            head.weight.copy_(weight)
+            if head.bias is not None:
+                head.bias.zero_()
+
+    def _freeze_head(self):
+        head = self._get_head()
+        head.weight.requires_grad = False
+        if head.bias is not None:
+            head.bias.requires_grad = False
+
+    def extract_features(self, x):
+        return self.base.extract_features(x)
+
+    def only_liner(self, features):
+        feat = F.normalize(features, p=2, dim=1)
+        proto = F.normalize(self._get_head().weight, p=2, dim=1)
+        return self.scaling * torch.matmul(feat, proto.t())
+
+    def forward(self, x, returnFeature=False):
+        features = self.extract_features(x)
+        logits = self.only_liner(features)
+        if returnFeature:
+            return logits, features
+        return logits
+
+
+def _fednh_get_head(net):
+    real = _fednh_unwrap(net)
+    if isinstance(real, FedNHWrapper):
+        return real._get_head()
+    if hasattr(real, 'linear'):
+        return real.linear
+    if hasattr(real, 'fc'):
+        return real.fc
+    raise AttributeError('Model must expose linear or fc classifier head')
+
+
+def wrap_fednh_model(net, args):
+    """Attach a FedNH cosine head; no-op if already wrapped."""
+    real = _fednh_unwrap(net)
+    if isinstance(real, FedNHWrapper):
+        return net
+    return FedNHWrapper(
+        base=net,
+        num_classes=args.num_classes,
+        scaling=getattr(args, 'fednh_s', 30.0),
+        fix_scaling=getattr(args, 'fednh_fix_scaling', False),
+    )
+
+
+def _fednh_is_head_key(key):
+    name = key.split('module.')[-1]
+    return name.endswith(('linear.weight', 'linear.bias', 'fc.weight', 'fc.bias'))
+
+
+class LocalUpdateFedNH(object):
+    """
+    FedNH client update.
+
+    Freeze the class prototypes, train only the backbone (and optionally the
+    scalar s) with cosine softmax, then upload class-wise mean embeddings.
+    """
+
+    def __init__(self, args, dataset=None, idxs=None, task=0, pretrain=False):
+        self.args = args
+        self.loss_func = nn.CrossEntropyLoss()
+        self.selected_clients = []
+        self.ldr_train = load_train_data(dataset, idxs, task, batch_size=self.args.local_bs)
+        self.pretrain = pretrain
+        self.num_classes = args.num_classes
+
+    def _trainable_params(self, net):
+        real = _fednh_unwrap(net)
+        if isinstance(real, FedNHWrapper):
+            real._freeze_head()
+        else:
+            head = _fednh_get_head(real)
+            head.weight.requires_grad = False
+            if head.bias is not None:
+                head.bias.requires_grad = False
+        return [p for p in net.parameters() if p.requires_grad]
+
+    def _estimate_prototypes(self, net):
+        """Mean L2-normalized features per class (FedNH Eq. 3)."""
+        real = _fednh_unwrap(net)
+        was_training = net.training
+        net.eval()
+        head = _fednh_get_head(real)
+        feat_dim = head.weight.size(1)
+        proto_sum = torch.zeros(self.num_classes, feat_dim, device=self.args.device)
+        proto_count = torch.zeros(self.num_classes, device=self.args.device)
+
+        with torch.no_grad():
+            for images, labels in self.ldr_train:
+                images, labels = images.to(self.args.device), labels.to(self.args.device)
+                features = F.normalize(real.extract_features(images), p=2, dim=1)
+                for cls in labels.unique():
+                    cls_id = int(cls.item())
+                    mask = labels == cls
+                    proto_sum[cls_id] += features[mask].sum(dim=0)
+                    proto_count[cls_id] += mask.sum().item()
+
+        prototypes = torch.zeros_like(proto_sum)
+        valid = proto_count > 0
+        prototypes[valid] = proto_sum[valid] / proto_count[valid].unsqueeze(1)
+        prototypes[valid] = F.normalize(prototypes[valid], p=2, dim=1)
+
+        if was_training:
+            net.train()
+        return prototypes.cpu(), proto_count.cpu()
+
+    def train(self, net, lr, idx=-1, local_eps=None):
+        net.train()
+        params = self._trainable_params(net)
+        optimizer = torch.optim.SGD(
+            params, lr=lr, momentum=self.args.momentum, weight_decay=self.args.wd
+        )
+
+        epoch_loss = []
+        if local_eps is None:
+            local_eps = self.args.local_ep_pretrain if self.pretrain else self.args.local_ep
+
+        for _ in range(local_eps):
+            batch_loss = []
+            for images, labels in self.ldr_train:
+                images, labels = images.to(self.args.device), labels.to(self.args.device)
+                logits = net(images)
+                loss = self.loss_func(logits, labels)
+
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(params, max_norm=10.0)
+                optimizer.step()
+                batch_loss.append(loss.item())
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+
+        prototypes, proto_counts = self._estimate_prototypes(net)
+        return net.state_dict(), sum(epoch_loss) / len(epoch_loss), prototypes, proto_counts
+
